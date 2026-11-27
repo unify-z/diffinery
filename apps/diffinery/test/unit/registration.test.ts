@@ -171,6 +171,21 @@ describe("Turnstile", () => {
     expect(turnstileProblem(r)).toMatch(/requires Turnstile, but it has no TURNSTILE_SITE_KEY/);
   });
 
+  it("without keys the sign-in page doesn't link to a sign-up that can only refuse, and the page says why", async () => {
+    const s = setup({ PUBLIC_URL: PUB, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
+    await save(s, { enabled: true, methods: ["password"] });
+    const r = await registrationPolicy(s.env);
+    expect(r.enabled).toBe(true);
+    expect(r.blockedBy).toBe("turnstile");
+    expect(registrationSummary(r)).toMatch(/nobody can register.*TURNSTILE_SITE_KEY/);
+    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+    const html = await (await app.fetch(new Request(`${PUB}/login`, { headers: { accept: "text/html" } }), s.env, ctx)).text();
+    expect(html).not.toMatch(/href="\/signup"/);
+    // The sign-up page itself still answers with the readable reason.
+    const page = await app.fetch(new Request(`${PUB}/signup/password`, { headers: { accept: "text/html" } }), s.env, ctx);
+    expect(page.status).toBe(503);
+  });
+
   it("inherit uses the instance's keys when present", async () => {
     const s = setup({ TURNSTILE_SITE_KEY: "site", TURNSTILE_SECRET: "secret" });
     const r = await registrationPolicy(s.env);

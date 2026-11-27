@@ -572,7 +572,7 @@ export function registerAuth(web: WebApp): void {
           <button class="btn block">Sign in with a password</button>
         </Form>
         <div class="authfoot muted small">
-          {registration.enabled ? (
+          {registration.enabled && !registration.blockedBy ? (
             <p>
               New here? <a href="/signup">Create an account</a> ({registration.methods.map((m) => METHOD_LABEL[m].toLowerCase()).join(", ")}).
             </p>

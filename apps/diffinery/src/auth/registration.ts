@@ -117,8 +117,10 @@ export interface Registration {
   policy: RegistrationPolicy;
   /** `SIGNUP=open` is set: registration is on and the emailed-code way is on, whatever the page says. */
   forcedByEnv: boolean;
-  /** Registration is on now, with at least one way in that can run. */
+  /** Registration is on now, with at least one way in that can run. The sign-up pages answer while it is. */
   enabled: boolean;
+  /** On, but the forms refuse (503, with the reason on the page) until this is fixed: the sign-in page doesn't link to them. */
+  blockedBy: "turnstile" | null;
   /** The ways switched on, with SIGNUP=open's addition. */
   configured: SignupMethod[];
   /** The ways in offered now: configured, minus those this instance can't run (no email transport). */
@@ -162,17 +164,20 @@ export async function registrationPolicy(env: Env): Promise<Registration> {
   // that means it can't run at all, rather than making unconfirmed accounts.
   const possible = (m: SignupMethod): boolean => (m === "email_code" ? email : m === "password" && policy.requireEmailVerification ? email : true);
   const open = policy.enabled || forcedByEnv;
+  const turnstile = turnstileSetting(env, policy.turnstile);
   const methods = open ? configured.filter(possible) : [];
   return {
     policy,
     forcedByEnv,
     enabled: methods.length > 0,
+    // Without Turnstile keys every form refuses (the check is never weakened), so the sign-in page must not link to it.
+    blockedBy: methods.length > 0 && turnstile.mode === "missing" ? "turnstile" : null,
     configured,
     methods,
     email,
     requireEmailVerification: policy.requireEmailVerification,
     newAccountStatus: policy.newAccountStatus,
-    turnstile: turnstileSetting(env, policy.turnstile),
+    turnstile,
   };
 }
 
@@ -247,6 +252,8 @@ export async function saveRegistrationPolicy(env: Pick<Env, "DB" | "EMAIL" | "SM
 
 /** One sentence for the admin page: who can register, and what a new account becomes. */
 export function registrationSummary(r: Registration): string {
+  const override = r.forcedByEnv ? " SIGNUP=open is set, so registration stays on whatever this page says." : "";
+  if (r.blockedBy === "turnstile") return `Registration is on, but nobody can register: this instance has no TURNSTILE_SITE_KEY and TURNSTILE_SECRET, and sign-up refuses without the bot check. The sign-in page says invite-only until the keys are set. Invitations and /setup still work.${override}`;
   if (!r.enabled) {
     if (r.policy.enabled) return "Registration is on, but no way in can run on this instance right now (see the ways above). Invitations and /setup still work.";
     return "Closed: nobody can create an account themselves. Invitations and /setup still work.";
