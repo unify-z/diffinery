@@ -18,7 +18,6 @@ import { ICONS } from "./assets.js";
 import { GITHUB_REPO, githubStars } from "./github-stars.js";
 import { fenceHighlighter } from "./highlight.js";
 import { escapeHtml, fenceLangs, renderMarkdown } from "./markdown.js";
-import type { Repo } from "../lib/directory.js";
 import { SITE } from "./seo.js";
 import { Time, render, StarButton, type WebApp } from "./ui.js";
 
@@ -519,64 +518,66 @@ export const Landing: FC<{ stars?: number | null }> = ({ stars }) => (
 );
 
 /** One row of the front page's repository table. */
-const RepoRow: FC<{ repo: Repo }> = ({ repo }) => (
-  <tr>
-    <td>
-      <a href={`/${repo.owner_login}/${repo.name}`}>
-        <b>
-          {repo.owner_login}/{repo.name}
-        </b>
-      </a>
-      {repo.archived ? <span class="badge">archived</span> : null}
-      {repo.description ? <div class="muted small">{repo.description}</div> : null}
-    </td>
-    <td class="right muted small nowrap">
-      <Time at={repo.pushed_at ?? repo.updated_at} />
-    </td>
-  </tr>
-);
-
 /**
- * The instance's own front page for signed-out visitors, when SITE_HOME=repos: what a Git host
- * shows, which is its public repositories and a way in. The project's own instance leaves the
- * variable unset and keeps the landing page below; the marketing and documentation pages have their
- * own paths either way (/features, /compare, /docs). `gitHost` drops the Product/Compare links, the
- * star button and the marketing footer.
+ * The instance's own front page for signed-out visitors, when SITE_HOME=features: what this Git
+ * host offers, and a way in — not the project's landing page (the Cloudflare pitch, the compare
+ * links, the GitHub star button) and not a repository listing either.
+ *
+ * The list of every public repository is deliberately not here: a repository's own page is its
+ * front door, and an operator's instance should not become a directory of everyone's work. The
+ * public site's pages keep their own paths (/features, /compare, /docs), and /index.md still serves
+ * the project description to crawlers and assistants.
  */
-export async function repositoriesPage(c: AppContext): Promise<Response> {
+const FEATURES: Array<{ title: string; body: string }> = [
+  { title: "Git over HTTPS", body: "Clone, fetch and push with any Git client, LFS included. Each repository has its own database, so a push is applied one at a time with no locks." },
+  { title: "Pull requests and reviews", body: "Diffs, review comments, required approvals, a merge queue and merge on green. Branch protection decides who may push and who may merge." },
+  { title: "Issues and milestones", body: "Issues, labels, assignees and milestones, with the same GitHub-compatible REST and GraphQL APIs, so gh and Octokit work as they do there." },
+  { title: "GitHub Actions–compatible CI", body: "Your .github/workflows/ files run unchanged, marketplace actions included, on hosted runners or on machines you add yourself." },
+  { title: "Releases and a container registry", body: "Releases with assets, deployments and environments, and images pushed to this instance's own registry host." },
+  { title: "Built for AI agents", body: "Agents are accounts of their own, owned by a person, with guardrails this server enforces: no push to a protected branch, no merge without a human." },
+  { title: "Sign in without passwords", body: "Passkeys instead of a password, invite-only accounts, tokens for git and the API, and an audit log of who did what." },
+  { title: "An MCP server and APIs", body: "REST, GraphQL and an MCP server, so editors, the CLI and AI apps reach the same repositories the web UI shows." },
+];
+
+export async function featuresPage(c: AppContext): Promise<Response> {
   const o = origin(c);
   if (wantsMarkdown(c)) return markdownResponse(c, homeMarkdown(o));
-  c.header("link", `<${o}/index.md>; rel="alternate"; type="text/markdown", <${o}/llms.txt>; rel="describedby"; type="text/plain"`);
+  c.header("link", `<${o}/index.md>; rel="alternate" type="text/markdown", <${o}/llms.txt>; rel="describedby" type="text/plain"`);
   c.header("vary", "Accept");
-  const repos = await c.get("dir").publicRepos(20);
   const host = new URL(c.env.PUBLIC_URL).host;
+  const me = c.get("principal").type === "account";
   return render(
     c,
     {
-      title: "Repositories",
+      title: `Git hosting on ${host}`,
       gitHost: true,
-      description: `Public repositories on ${host}: a Git host with pull requests, issues and CI.`,
-      jsonLd: [{ "@type": "WebSite", "@id": `${o}/#website`, url: `${o}/`, name: host, description: `Public repositories on ${host}.` }],
+      description: `${host} hosts Git repositories with pull requests, issues, releases, a container registry and GitHub Actions–compatible CI.`,
+      jsonLd: [{ "@type": "WebSite", "@id": `${o}/#website`, url: `${o}/`, name: host, description: `Git hosting with pull requests, issues and CI on ${host}.` }],
     },
     <div class="home">
-      <div class="box">
-        <div class="head">
-          <h1 class="m0">Repositories</h1>
-          <span class="badge">{repos.length}</span>
+      <section class="box">
+        <div class="body">
+          <h1 class="m0">Git hosting on {host}</h1>
+          <p class="muted" style="margin-top:8px">
+            Repositories, pull requests, issues, releases and CI, in one place. Sign in with a passkey to create a repository, or push to one you already have.
+          </p>
+          <p class="row" style="margin:16px 0 0">
+            <a href={me ? "/new" : "/login"} class="btn primary">
+              {me ? "New repository" : "Sign in"}
+            </a>
+            <a href="/docs" class="btn">
+              Documentation
+            </a>
+          </p>
         </div>
-        {repos.length ? (
-          <table class="files">
-            <tbody>
-              {repos.map((repo) => (
-                <RepoRow repo={repo} />
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <div class="empty">
-            No public repositories yet. <a href="/login">Sign in</a> to create one, or push to an existing repository.
+      </section>
+      <div class="features">
+        {FEATURES.map((f) => (
+          <div class="box">
+            <h3>{f.title}</h3>
+            <p class="muted small m0">{f.body}</p>
           </div>
-        )}
+        ))}
       </div>
     </div>,
   );

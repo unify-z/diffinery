@@ -27,7 +27,7 @@ import { gatherToday } from "../agentic/today.js";
 import { ContactMessages } from "../lib/contact.js";
 import { EarlyAccess } from "../lib/early-access.js";
 import { COLLAPSED_COOKIE, Rows, Section, TodayView, collapsedSections } from "../agentic/web.js";
-import { landingPage, repositoriesPage } from "./site.js";
+import { featuresPage, landingPage } from "./site.js";
 import { serverErrors } from "../lib/server-errors.js";
 import { indexNowStatus } from "./indexnow.js";
 import { ComputePausedBanner, KillSwitchesPage } from "./kill-switches.js";
@@ -199,7 +199,7 @@ const MyInvitations: FC<{ invites: Awaited<ReturnType<Directory["invitesFor"]>>;
 export function registerAccount(web: WebApp): void {
   web.get("/", async (c) => {
     const p = c.get("principal");
-    if (p.type !== "account") return c.env.SITE_HOME === "repos" ? repositoriesPage(c) : landingPage(c);
+    if (p.type !== "account") return c.env.SITE_HOME === "features" ? featuresPage(c) : landingPage(c);
     const me = p.account;
     const t = csrfToken(c);
     if (me.status === "disabled") {
