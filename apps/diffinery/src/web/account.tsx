@@ -32,6 +32,7 @@ import { serverErrors } from "../lib/server-errors.js";
 import { indexNowStatus } from "./indexnow.js";
 import { ComputePausedBanner, KillSwitchesPage } from "./kill-switches.js";
 import { registerRegistrationAdmin } from "./registration.js";
+import { registerBotCheckAdmin } from "./bot-check.js";
 import { changePause, changeSuspension, cleanReason, type Stopped } from "../lib/killswitch.js";
 import { blockList, cleanResolution, openReportCount, report, reports, setReportState, suspend, suspendReason, unsuspend, visibleTo } from "../lib/moderation.js";
 import { BlockList, hasBlocked, ProfileMenu, ReportDetail, ReportsList, SuspendControl } from "./moderation.js";
@@ -637,9 +638,9 @@ const AUTO_MERGE_METHODS = [
   { value: "rebase", label: "Rebase and merge" },
 ];
 
-export type SettingsTab = "profile" | "account" | "appearance" | "pull-requests" | "security" | "tokens" | "apps" | "installations" | "github-runners" | "agents" | "model-access" | "orgs" | "invitations" | "notifications" | "email-address" | "blocked" | "linked" | "admin" | "reports" | "email" | "audit" | "kill-switches" | "errors" | "security-reports" | "status" | "early-access" | "contact" | "search-engines" | "registration" | "instance";
+export type SettingsTab = "profile" | "account" | "appearance" | "pull-requests" | "security" | "tokens" | "apps" | "installations" | "github-runners" | "agents" | "model-access" | "orgs" | "invitations" | "notifications" | "email-address" | "blocked" | "linked" | "admin" | "reports" | "email" | "audit" | "kill-switches" | "errors" | "security-reports" | "status" | "early-access" | "contact" | "search-engines" | "registration" | "bot-check" | "instance";
 /** The site administration pages: they show when hosted compute is paused. */
-export const ADMIN_TABS: readonly SettingsTab[] = ["admin", "registration", "instance", "early-access", "contact", "reports", "email", "audit", "kill-switches", "errors", "security-reports", "status", "search-engines"];
+export const ADMIN_TABS: readonly SettingsTab[] = ["admin", "registration", "bot-check", "instance", "early-access", "contact", "reports", "email", "audit", "kill-switches", "errors", "security-reports", "status", "search-engines"];
 
 /** The number of confirmed early access requests waiting, next to Early access in the sidebar (lib/early-access.ts). */
 const EarlyAccessWaiting = async ({ db }: { db?: D1Database }) => {
@@ -754,6 +755,9 @@ export const SettingsNav: FC<{ me: Account; tab: SettingsTab; db?: D1Database }>
             </a>
             <a href="/settings/admin/registration" class={tab === "registration" ? "on" : ""}>
               Registration
+            </a>
+            <a href="/settings/admin/bot-check" class={tab === "bot-check" ? "on" : ""}>
+              Bot check
             </a>
             <a href="/settings/admin/instance" class={tab === "instance" ? "on" : ""}>
               Instance
@@ -2075,6 +2079,8 @@ function registerSettings(web: WebApp): void {
   });
   // Settings → Site administration → Registration: who may create an account (web/registration.tsx).
   registerRegistrationAdmin(web, { requireSiteAdmin, page });
+  // Settings → Site administration → Bot check: the check and both providers' keys (web/bot-check.tsx).
+  registerBotCheckAdmin(web, { requireSiteAdmin, page });
   web.get("/settings/admin/errors", async (c) => {
     const me = requireSiteAdmin(c);
     const id = c.req.query("id")?.trim() || undefined;

@@ -4,7 +4,7 @@ import { Directory, type Account } from "../lib/directory.js";
 import { MailStore, wantsEmail } from "./prefs.js";
 import { compose, toHtml, toText, type RenderCtx } from "./templates.js";
 import { categoryOf, isMandatory, type MailJob } from "./types.js";
-import { SmtpError, sendSmtp, smtpConfig, type SmtpConfig } from "./smtp.js";
+import { SmtpError, sendSmtp, smtpConfiguration, type SmtpConfig } from "./smtp.js";
 import { REASON_TEXT, Suppressions, sendSuppression } from "./suppression.js";
 import { unsubUrl } from "./unsubscribe.js";
 
@@ -82,15 +82,16 @@ export class RetryableMailError extends Error {}
 
 /**
  * How this instance sends email: Cloudflare Email Sending when the EMAIL binding is there, else
- * the SMTP server in SMTP_URL (with what is wrong with it, if anything); null when neither is set.
+ * the SMTP server saved in Settings → Email or named by SMTP_URL (with what is wrong with it, if
+ * anything); null when neither is set.
  */
 export type MailTransport = { kind: "email-sending"; binding: SendEmail } | { kind: "smtp"; config: SmtpConfig } | { kind: "smtp"; error: string };
 
-export function mailTransport(env: Pick<Env, "EMAIL" | "SMTP_URL" | "SMTP_PASSWORD">): MailTransport | null {
+export async function mailTransport(env: Pick<Env, "EMAIL" | "DB" | "MASTER_KEY" | "MASTER_KEY_PREV" | "SMTP_URL" | "SMTP_PASSWORD">): Promise<MailTransport | null> {
   if (env.EMAIL) return { kind: "email-sending", binding: env.EMAIL };
-  const smtp = smtpConfig(env);
+  const smtp = await smtpConfiguration(env);
   if (!smtp) return null;
-  return "error" in smtp ? { kind: "smtp", error: smtp.error } : { kind: "smtp", config: smtp };
+  return "error" in smtp ? { kind: "smtp", error: smtp.error } : { kind: "smtp", config: smtp.config };
 }
 
 /** The address every email is sent from: MAIL_FROM, or notifications@ the public host. */
@@ -220,10 +221,10 @@ export async function deliver(env: Env, job: MailJob, opts: DeliverOptions = {})
   const msg = await buildMessage(env, job, to);
   const devCopy = devAuth(env) ? JSON.stringify(msg) : null;
   const base = { account_id: to.accountId ?? null, to_addr: to.email, kind: job.kind, subject: msg.subject, dev_copy: devCopy };
-  const transport = mailTransport(env);
+  const transport = await mailTransport(env);
   if (!transport) {
-    await store.log({ ...base, status: "skipped", detail: "email sending is not configured (no EMAIL binding or SMTP_URL)", message_id: null });
-    return { status: "skipped", detail: "no EMAIL binding or SMTP_URL" };
+    await store.log({ ...base, status: "skipped", detail: "email sending is not configured (no EMAIL binding or SMTP server)", message_id: null });
+    return { status: "skipped", detail: "no EMAIL binding or SMTP server" };
   }
   let res: { messageId?: string };
   try {

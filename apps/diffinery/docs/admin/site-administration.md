@@ -12,12 +12,13 @@ Site administrators have admin on every repository, can act as an owner of every
 | Page | Path | What it is for |
 | --- | --- | --- |
 | **People and invitations** | `/settings/admin` | Access requests, instance invitations, the list of users, account status and sign-in links |
-| **Registration** | `/settings/admin/registration` | Whether people can create an account themselves, which ways in are on, the status of new accounts, and the bot check (Turnstile, cap.js or none) |
+| **Registration** | `/settings/admin/registration` | Whether people can create an account themselves, which ways in are on, and the status of new accounts |
+| **Bot check** | `/settings/admin/bot-check` | Which check runs in front of the sign-up forms, and the keys for both providers (Cloudflare Turnstile and cap.js) |
 | **Instance** | `/settings/admin/instance` | Demo or production: what the instance advertises and which project pages it serves |
 | **Early access** | `/settings/admin/early-access` | Requests from people without an invitation, to invite, decline or delete |
 | **Contact messages** | `/settings/admin/contact` | Messages from the contact form, to read, answer, mark handled or spam, and delete |
 | **Reports** | `/settings/admin/reports` | What people reported as abusive, to look at and resolve |
-| **Email** | `/settings/admin/email` | Email delivery status, the suppression list, template previews and the log of every email |
+| **Email** | `/settings/admin/email` | Email delivery status, the SMTP server, the suppression list, template previews and the log of every email |
 | **Kill switches** | `/settings/admin/kill-switches` | Stop Actions and agent sandboxes for a repository, an account or the whole instance |
 | **Security reports** | `/settings/admin/security-reports` | Private vulnerability reports from the report form, to read, triage and resolve |
 | **Status** | `/settings/admin/status` | Incidents on the public status page, to open, update and resolve |
@@ -142,38 +143,39 @@ The top of the page says what applies now, for example "Open: password, passkey.
 
 - **Let people create accounts themselves**: the switch. Off, the sign-in page says the instance is invite-only and every sign-up page and form refuses. It takes effect on the next request.
 - **Ways in**: each is on by itself; turn on as many as you like.
-  - **Emailed code**: someone enters an address, gets a 6-digit code, then picks a username and creates a passkey. This is the only way in that confirms the address. It needs an email transport (`SMTP_URL` or the `EMAIL` binding).
+  - **Emailed code**: someone enters an address, gets a 6-digit code, then picks a username and creates a passkey. This is the only way in that confirms the address. It needs an email transport (SMTP on [Email](#email), or the `EMAIL` binding).
   - **Passkey**: an address, a username and a passkey, with no email.
   - **Password**: an address, a username and a password, with no email.
   - Passkey and password never confirm the address. An account made that way is usable, but it grants nothing by itself: it is never a bootstrap administrator, it takes no invitation sent to its address, and if someone later proves the address (with an invitation's email, an emailed sign-up code or email recovery) the address moves to them. Both also tell the visitor when an address already has an account, because no email is sent to its owner instead.
 - **New account status**: **Active** lets people use the site at once. **Pending** lets them sign in but not use the site until you approve them under **People and invitations**.
-- **Bot check**: which check runs in front of the sign-up forms. See [Bot checks](#bot-checks).
+- **Bot check**: which check runs in front of the sign-up forms, and both providers' keys, are on [Bot check](#bot-check). This page says which one is in force; the check is never saved here.
 
 A production instance needs an email transport before registration can be opened, because an address can't be confirmed without one; the page refuses and says so. Demo mode relaxes it, so a bare install can be tried out; see [Instance](#instance).
 
-### Bot checks
+### The audit log
+
+Each save is `registration.policy.update` (the switch, the ways in and the new-account status on Registration, and the bot check's provider on Bot check), `captcha.settings.update` for either provider's keys on Bot check, `email.smtp.update` for the SMTP server, and `instance.settings.update` for the mode, each with what it was and what it is. New accounts are `signup` (the passkey ways) or `account.signup` (the password way).
+
+## Bot check
+
+**Settings → Site administration → Bot check** (`/settings/admin/bot-check`) is where both bot checks live: which one runs, and the keys for each. It changes how the sign-up forms are protected, never who may register; that is [Registration](#registration). Every save is in the [audit log](/docs/security/audit-log), and takes effect on the next form, with no deploy.
 
 | Choice | What it does |
 | --- | --- |
 | **Automatic** (default) | cap.js when it is set up, else Turnstile when its keys are set, else none on the local machine. |
-| **Cloudflare Turnstile** | Turnstile's widget, with `TURNSTILE_SITE_KEY` and the `TURNSTILE_SECRET` secret. |
+| **Cloudflare Turnstile** | Turnstile's widget. Needs a site key and secret key, saved on this page or set in the deployment (`TURNSTILE_SITE_KEY` and the `TURNSTILE_SECRET` secret). |
 | **cap.js** | [cap.js](https://capjs.js.org), a self-hosted proof-of-work CAPTCHA: no Google, nothing from Cloudflare, the widget served from jsDelivr. |
 | **None** | No check. The rate limits and the daily email limits still apply. |
 
 A check that is chosen but not set up refuses every sign-up with a readable reason (and the page says which keys are missing); it never silently lets a script through.
 
-### cap.js
+The page has three forms:
 
-cap.js needs a server of its own (`capd`, see its documentation) plus a site key and that key's secret from its dashboard (not the capd `ADMIN_KEY`). You can give the instance one two ways:
+1. **Which check**: the choice above, saved on the registration policy.
+2. **Cloudflare Turnstile**: the widget's **Site key** (`0x4AAAAAAA…`) and **Secret key**. Create the widget in the Cloudflare dashboard (Turnstile). The early access request, the contact form and the security report form always use these keys, whatever the choice above says.
+3. **cap.js server**: the server address, the site key from the capd dashboard and that key's secret (not the capd `ADMIN_KEY`). The widget comes from `cdn.jsdelivr.net`.
 
-- **Settings → Registration → cap.js server**: enter the server address, the site key and the secret. The secret is sealed with `MASTER_KEY` before it is stored and is never shown again. Saved here, it applies to the next sign-up and wins over the deployment's variables.
-- **The deployment**: `CAP_ENDPOINT`, `CAP_SITE_KEY` and the `CAP_SECRET` secret (see [Configuration](/docs/self-hosting/configuration#cap_endpoint)). On celld, `CAP_SECRET` is copied into the rendered config like every other secret.
-
-Leaving the server empty in Settings falls back to the deployment's variables.
-
-### The audit log
-
-Each save is `registration.policy.update`, `captcha.settings.update` for the cap.js server, and `instance.settings.update` for the mode, each with what it was and what it is. New accounts are `signup` (the passkey ways) or `account.signup` (the password way).
+Secrets are sealed with `MASTER_KEY` before they are stored and are never shown again: leave the secret field empty to keep the one that is saved. Saved keys win over the deployment's variables; save an empty site key (or an empty cap.js server) to go back to them. A Turnstile site key must look like `0x4AAAAAAA…`, and a cap.js server must be `https` (or `http` on this machine).
 
 ## Instance
 
@@ -358,11 +360,11 @@ Storage is counted per repository as it changes: each repository's Durable Objec
 
 ## Email
 
-**Settings → Email** (`/settings/admin/email`) shows whether the instance can send email and lets you check every template.
+**Settings → Email** (`/settings/admin/email`) shows whether the instance can send email, takes the SMTP server, and lets you check every template.
 
 | Item | What it shows |
 | --- | --- |
-| **Sending** | "Cloudflare Email Sending is bound"; "over SMTP: smtps://user@host:465", the server in `SMTP_URL` (never the password); "SMTP_URL is set but can't be used: ..." with the reason; or "not configured (no EMAIL binding or SMTP_URL): emails are logged, not sent". See [SMTP](/docs/self-hosting/configuration#smtp). |
+| **Sending** | "Cloudflare Email Sending is bound"; "over SMTP: smtps://user@host:465", the server in force (never the password); "SMTP is set but can't be used: ..." with the reason; or "not configured (no EMAIL binding or SMTP server): emails are logged, not sent". See [SMTP](#smtp-server). |
 | **Queue** | `diffinery-mail`, or "not bound: emails are dropped" |
 | **From** | The address emails are sent from: `MAIL_FROM`, or `notifications@<your hostname>` when it is empty (see [Configuration](/docs/self-hosting/configuration)) |
 | **Bounces and complaints** | Where they come from: the `diffinery-mail-events` queue, and whether the signed endpoint is on (`MAIL_EVENTS_SECRET` set) |
@@ -381,11 +383,21 @@ Under **Templates**, pick a template from the menu to preview it in the page. **
 
 See [Notifications](/docs/accounts/notifications#every-email-diffinery-sends) for when each email is sent.
 
+### SMTP server
+
+Without Cloudflare Email Sending (the `EMAIL` binding), email goes through an SMTP server, and **Send over SMTP** on this page is where it is set. What is saved here wins over the deployment's `SMTP_URL` and `SMTP_PASSWORD`, and applies to the next email, with no deploy. The box's badge says whether the server is **set here**, comes **from the deployment**, can't be used, or is not set up at all.
+
+- **Server**: `smtps://<user>@<host>:465` (TLS from the first byte) or `smtp://<user>@<host>:587` (STARTTLS, which is required). Write an `@` in the user as `%40`. A password in the URL is refused: it belongs in the field below.
+- **Password**: sealed with `MASTER_KEY` before it is stored and never shown again. Leave it empty to keep the one that is saved.
+- **Save SMTP** stores both. Save an empty server to stop using the one saved here, so `SMTP_URL` and `SMTP_PASSWORD` apply again.
+
+Then **Send me a test email** above checks it. Both saves are `email.smtp.update` in the audit log, with the server (never the password). See [SMTP](/docs/self-hosting/configuration#smtp) for the answers an SMTP server can give.
+
 ### Email API for administrators
 
 | Method and path | Description | Needs |
 | --- | --- | --- |
-| `GET /api/v3/diffinery/admin/email` | `sending` and `queue` (whether they are configured), `transport` (`email-sending`, `smtp` or `null`), `smtp` (`url`, the server without the password, and `error`, why `SMTP_URL` can't be used; `null` unless `transport` is `smtp`), `from` (the sender address: `MAIL_FROM`, or `notifications@<your hostname>` when it is empty), `last_24h` counts (`sent`, `failed`, `skipped`) and the `last` email logged | site administrator, any token scope |
+| `GET /api/v3/diffinery/admin/email` | `sending` and `queue` (whether they are configured), `transport` (`email-sending`, `smtp` or `null`), `smtp` (`url`, the server in force without the password, and `error`, why it can't be used; `null` unless `transport` is `smtp`), `from` (the sender address: `MAIL_FROM`, or `notifications@<your hostname>` when it is empty), `last_24h` counts (`sent`, `failed`, `skipped`) and the `last` email logged | site administrator, any token scope |
 | `POST /api/v3/diffinery/admin/emails/samples` | Send every template to yourself now, or only some with `{"only": ["signin", "invite-org"]}`. Returns `to`, `sent`, `total` and each result. | site administrator, with an `admin` token for all repositories or a browser session |
 | `GET /api/v3/diffinery/admin/email/suppressions` | The suppression list, newest first: `email`, `reason`, `detail`, `source` (`cloudflare`, `webhook`, `send` or `admin`), `created_by`, `created_at` and `owner_can_lift` | site administrator, any token scope |
 | `PUT /api/v3/diffinery/admin/email/suppressions/{email}` | Suppress an address by hand, with an optional `{"note": "..."}`. Audited as `email.suppression.add`. | site administrator, with an `admin` token or a browser session |
@@ -577,11 +589,12 @@ Approving access requests, changing account status and creating sign-in links ar
 | "enable this account first" | Sign-in links can't be created for disabled accounts. Set the status to `active`, then create the link. |
 | "enter a valid email address" | The invite form needs an address like `friend@example.com`. |
 | `403 only site admins can invite people without an organization` | Instance invites from the CLI or API need a site administrator; others must pass `--org`. |
-| **Sending** says "not configured" | The Worker has neither a `send_email` binding nor `SMTP_URL`, so emails are logged as skipped. See [Configuration](/docs/self-hosting/configuration) and [SMTP](/docs/self-hosting/configuration#smtp). |
-| **Sending** says "SMTP_URL is set but can't be used" | Fix what it names, such as a password in the URL (it belongs in the `SMTP_PASSWORD` secret) or a missing `SMTP_PASSWORD`. Until then emails fail with `E_SMTP_CONFIG`. |
-| `E_SMTP_REJECTED: SMTP AUTH: 535 ...` | The SMTP server refused the user or password. Check the user in `SMTP_URL` and the `SMTP_PASSWORD` secret. |
+| **Sending** says "not configured" | The Worker has neither a `send_email` binding nor an SMTP server, so emails are logged as skipped. Set one under **Settings → Email → Send over SMTP**, or see [Configuration](/docs/self-hosting/configuration) and [SMTP](/docs/self-hosting/configuration#smtp). |
+| **Sending** says "SMTP is set but can't be used" | Fix what it names, such as a password in the URL (it belongs in the Password field) or a user without a password. Until then emails fail with `E_SMTP_CONFIG`. |
+| **Sending** says "the saved SMTP password can't be opened with this MASTER_KEY" | The password saved on **Settings → Email** was sealed with another `MASTER_KEY` (or none is configured now). Save it again. |
+| `E_SMTP_REJECTED: SMTP AUTH: 535 ...` | The SMTP server refused the user or password. Check the user in the server field and the password saved under **Settings → Email**. |
 | `E_SMTP_REJECTED: SMTP MAIL FROM: 5...` | The SMTP user may not send from `MAIL_FROM`. Use an address the server allows. |
-| `gave up after 6 attempts: SMTP ...` | The SMTP server kept answering `4xx`, or couldn't be reached in time. Check the host and port in `SMTP_URL`; port 25 is blocked on Cloudflare. |
+| `gave up after 6 attempts: SMTP ...` | The SMTP server kept answering `4xx`, or couldn't be reached in time. Check the host and port of the server on **Settings → Email**; port 25 is blocked on Cloudflare. |
 | Emails show as `failed` | The **Recent emails** detail has Cloudflare's or the SMTP server's error. Check the sending domain's DNS records and the queue. |
 | Emails show as `skipped` with "address is suppressed" | The address bounced, reported spam or was suppressed by hand. See [Bounces, complaints and the suppression list](#bounces-complaints-and-the-suppression-list). |
 | `E_RECIPIENT_SUPPRESSED` | The address is on Cloudflare's own suppression list. Remove it in the Cloudflare dashboard. |

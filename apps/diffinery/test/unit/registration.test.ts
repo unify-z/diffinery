@@ -14,7 +14,7 @@ import type { Env } from "../../src/env.js";
 import type { Account } from "../../src/lib/directory.js";
 import { Directory } from "../../src/lib/directory.js";
 import { DEFAULT_POLICY, emailTransport, methodProblem, parsePolicy, policyFromForm, readRegistrationPolicy, registrationPolicy, registrationProblem, registrationSummary, saveRegistrationPolicy, signupProblem, type RegistrationPolicy } from "../../src/auth/registration.js";
-import { capConfiguration, normalCapEndpoint, normalCapSiteKey, verifyCaptcha } from "../../src/auth/captcha.js";
+import { capConfiguration, normalCapEndpoint, normalCapSiteKey, normalTurnstileSiteKey, readCaptchaSettings, turnstileCheck, turnstileConfiguration, verifyCaptcha } from "../../src/auth/captcha.js";
 import { encryptSecret } from "../../src/lib/crypto.js";
 import { readInstanceSettings } from "../../src/lib/instance.js";
 import { Signups, normalEmail } from "../../src/auth/signup.js";
@@ -135,7 +135,7 @@ describe("the switch and the ways in", () => {
     const r = await registrationPolicy(s.env);
     expect(r.methods).toEqual(["passkey"]);
     expect(methodProblem(r, "email_code")).toMatch(/can't send a sign-up code/);
-    expect(emailTransport(s.env)).toBe(false);
+    expect(await emailTransport(s.env)).toBe(false);
   });
 
   it("the emailed-code way can't be turned on without an email transport", async () => {
@@ -177,7 +177,7 @@ describe("the switch and the ways in", () => {
   it("an open switch with no way in is refused when saving", async () => {
     const s = setup();
     await expect(save(s, { enabled: true, methods: [] })).rejects.toMatchObject({ status: 422 });
-    expect(registrationProblem(s.env, { ...DEFAULT_POLICY, enabled: true })).toMatch(/at least one way/);
+    expect(registrationProblem({ ...DEFAULT_POLICY, enabled: true }, { email: true, emailRequired: false, captcha: { kind: "none", field: "cf-turnstile-response", missing: null } })).toMatch(/at least one way/);
   });
 
   it("the admin form drops unknown values rather than trusting them", () => {
@@ -303,11 +303,145 @@ describe("the bot check", () => {
     expect(cap).toMatchObject({ endpoint: "https://cap.internal.example", siteKey: "savedkey", secret: "stored-secret", source: "settings" });
   });
 
+  it("Turnstile keys set in Settings beat the deployment's pair, and clearing them falls back", async () => {
+    const s = setup({ TURNSTILE_SITE_KEY: "env-site", TURNSTILE_SECRET: "env-secret" });
+    const sealed = await encryptSecret(s.env, "captcha:turnstile", "stored-turnstile-secret");
+    s.DB.sqlite.prepare("UPDATE captcha_settings SET turnstile_site_key = ?, turnstile_secret = ? WHERE id = 1").run("0x4AAAAAAAsaved", sealed);
+    expect(await turnstileConfiguration(s.env)).toEqual({ siteKey: "0x4AAAAAAAsaved", secret: "stored-turnstile-secret", source: "settings" });
+    await save(s, { enabled: true, methods: ["passkey"], provider: "turnstile" });
+    expect((await registrationPolicy(s.env)).captcha).toMatchObject({ kind: "turnstile", siteKey: "0x4AAAAAAAsaved" });
+    // The secret is sealed, never stored as it was typed.
+    expect((s.DB.sqlite.prepare("SELECT turnstile_secret FROM captcha_settings").get() as { turnstile_secret: string }).turnstile_secret).toMatch(/^v2\./);
+    // An empty site key goes back to the deployment's variables.
+    s.DB.sqlite.prepare("UPDATE captcha_settings SET turnstile_site_key = NULL, turnstile_secret = NULL WHERE id = 1").run();
+    expect(await turnstileConfiguration(s.env)).toEqual({ siteKey: "env-site", secret: "env-secret", source: "environment" });
+  });
+
+  it("the public forms (early access, contact, security reports) use the stored Turnstile too", async () => {
+    const bare = noKeysSetup();
+    expect(await turnstileCheck(bare.env)).toEqual({ mode: "missing" });
+    const sealed = await encryptSecret(bare.env, "captcha:turnstile", "stored-turnstile-secret");
+    bare.DB.sqlite.prepare("UPDATE captcha_settings SET turnstile_site_key = ?, turnstile_secret = ? WHERE id = 1").run("0x4AAAAAAAsaved", sealed);
+    expect(await turnstileCheck(bare.env)).toEqual({ mode: "verify", siteKey: "0x4AAAAAAAsaved", secret: "stored-turnstile-secret", source: "settings" });
+  });
+
+  it("a half a pair is refused, and an empty server or site key clears the saved one", async () => {
+    const s = setup({ PUBLIC_URL: LOCAL, DEV_AUTH: "root@example.com", TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined, CAP_ENDPOINT: undefined, CAP_SITE_KEY: undefined, CAP_SECRET: undefined });
+    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+    const token = "csrf-token-for-the-bot-check-2";
+    const form = (path: string, fields: Array<[string, string]>) => {
+      const body = new URLSearchParams([...fields, ["_csrf", token]]).toString();
+      return app.fetch(new Request(`${LOCAL}${path}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "content-length": String(body.length), accept: "text/html", cookie: `dfy_csrf=${token}` }, body }), s.env, ctx);
+    };
+    // A site key with no secret anywhere would silently fall back to nothing: refused, nothing stored.
+    await form("/settings/admin/bot-check/turnstile", [["turnstile_site_key", "0x4AAAAAAAsaved"], ["turnstile_secret", ""]]);
+    expect(await readCaptchaSettings(s.env)).toMatchObject({ turnstileSiteKey: null });
+    // A whole pair is kept, and the saved secret survives a save that leaves it empty.
+    await form("/settings/admin/bot-check/turnstile", [["turnstile_site_key", "0x4AAAAAAAsaved"], ["turnstile_secret", "turnstile-secret"]]);
+    await form("/settings/admin/bot-check/turnstile", [["turnstile_site_key", "0x4AAAAAAAsaved"], ["turnstile_secret", ""]]);
+    expect(await turnstileConfiguration(s.env)).toMatchObject({ siteKey: "0x4AAAAAAAsaved", secret: "turnstile-secret", source: "settings" });
+    // An empty site key clears the pair, so the deployment's variables apply again (none here).
+    await form("/settings/admin/bot-check/turnstile", [["turnstile_site_key", ""], ["turnstile_secret", ""]]);
+    expect(await readCaptchaSettings(s.env)).toMatchObject({ turnstileSiteKey: null, turnstileSealedSecret: null });
+    expect(await turnstileConfiguration(s.env)).toBeNull();
+    // cap.js: a server without a secret is refused, and an empty server clears the pair.
+    await form("/settings/admin/bot-check/cap", [["cap_endpoint", "https://cap.internal.example"], ["cap_site_key", "savedkey"], ["cap_secret", ""]]);
+    expect(await readCaptchaSettings(s.env)).toMatchObject({ capEndpoint: null });
+    await form("/settings/admin/bot-check/cap", [["cap_endpoint", "https://cap.internal.example"], ["cap_site_key", "savedkey"], ["cap_secret", "cap-secret"]]);
+    expect(await capConfiguration(s.env)).toMatchObject({ endpoint: "https://cap.internal.example", secret: "cap-secret", source: "settings" });
+    await form("/settings/admin/bot-check/cap", [["cap_endpoint", ""], ["cap_site_key", "savedkey"], ["cap_secret", ""]]);
+    expect(await readCaptchaSettings(s.env)).toMatchObject({ capEndpoint: null, capSiteKey: null, capSealedSecret: null });
+  });
+
+  it("saving Registration keeps the bot check chosen on Bot check", async () => {
+    const s = setup({ PUBLIC_URL: LOCAL, DEV_AUTH: "root@example.com" });
+    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+    const token = "csrf-token-for-the-bot-check-3";
+    const form = (path: string, fields: Array<[string, string]>) => {
+      const body = new URLSearchParams([...fields, ["_csrf", token]]).toString();
+      return app.fetch(new Request(`${LOCAL}${path}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "content-length": String(body.length), accept: "text/html", cookie: `dfy_csrf=${token}` }, body }), s.env, ctx);
+    };
+    await form("/settings/admin/bot-check", [["provider", "none"]]);
+    expect((await readRegistrationPolicy(s.env)).provider).toBe("none");
+    // The Registration form has no provider field now: it must not reset the choice to Automatic.
+    await form("/settings/admin/registration", [["methods", "passkey"], ["new_account_status", "active"]]);
+    expect((await readRegistrationPolicy(s.env)).provider).toBe("none");
+    expect((await readRegistrationPolicy(s.env)).methods).toEqual(["passkey"]);
+  });
+
+  it("a cap.js sign-up page allows the capd origin in its content security policy", async () => {
+    const s = setup({ ...capEnv });
+    const sealed = await encryptSecret(s.env, "captcha:cap", "stored-secret");
+    s.DB.sqlite.prepare("UPDATE captcha_settings SET cap_endpoint = ?, cap_site_key = ?, cap_secret = ? WHERE id = 1").run("https://cap.internal.example", "savedkey", sealed);
+    await save(s, { enabled: true, methods: ["password"], provider: "cap" });
+    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+    const page = await app.fetch(new Request(`${PUB}/signup/password`, { headers: { accept: "text/html" } }), s.env, ctx);
+    expect(page.status).toBe(200);
+    // The widget fetches `${endpoint}/${siteKey}/api/...`: without that origin in connect-src the browser blocks it.
+    const csp = page.headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("connect-src");
+    expect(csp).toMatch(/connect-src[^;]*https:\/\/cap\.internal\.example/);
+    expect(await page.text()).toContain("data-cap-api-endpoint");
+  });
+
+  it("a Turnstile site key must look like one", () => {
+    expect(normalTurnstileSiteKey("")).toBeNull();
+    expect(normalTurnstileSiteKey("0x4AAAAAAA / sted")).toBeNull();
+    expect(normalTurnstileSiteKey(" 0x4AAAAAAAabc ")).toBe("0x4AAAAAAAabc");
+  });
+
+  it("the Bot check page saves both providers' keys and the provider itself", async () => {
+    const s = setup({ PUBLIC_URL: LOCAL, DEV_AUTH: "root@example.com", TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined, CAP_ENDPOINT: undefined, CAP_SITE_KEY: undefined, CAP_SECRET: undefined });
+    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+    const token = "csrf-token-for-the-bot-check-1";
+    const form = (path: string, fields: Record<string, string>) => {
+      const body = new URLSearchParams({ ...fields, _csrf: token }).toString();
+      return app.fetch(new Request(`${LOCAL}${path}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "content-length": String(body.length), accept: "text/html", cookie: `dfy_csrf=${token}` }, body }), s.env, ctx);
+    };
+    const page = await app.fetch(new Request(`${LOCAL}/settings/admin/bot-check`, { headers: { accept: "text/html" } }), s.env, ctx);
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('name="provider"');
+    expect(html).toContain('name="turnstile_site_key"');
+    expect(html).toContain('name="cap_endpoint"');
+    // One page, three forms: both providers' keys, then which check runs.
+    expect((await form("/settings/admin/bot-check/turnstile", { turnstile_site_key: "0x4AAAAAAAsaved", turnstile_secret: "TURNSTILE-PLAINTEXT-1" })).status).toBe(303);
+    expect((await form("/settings/admin/bot-check/cap", { cap_endpoint: "https://cap.internal.example", cap_site_key: "savedkey", cap_secret: "CAP-PLAINTEXT-1" })).status).toBe(303);
+    expect((await form("/settings/admin/bot-check", { provider: "turnstile" })).status).toBe(303);
+    const r = await registrationPolicy(s.env);
+    expect(r.policy.provider).toBe("turnstile");
+    // The provider save kept the rest of the policy as it was: registration is still closed.
+    expect(r.policy.enabled).toBe(false);
+    expect(r.captcha).toMatchObject({ kind: "turnstile", siteKey: "0x4AAAAAAAsaved" });
+    expect(await capConfiguration(s.env)).toMatchObject({ endpoint: "https://cap.internal.example", siteKey: "savedkey", secret: "CAP-PLAINTEXT-1", source: "settings" });
+    // Neither secret is ever sent back to a page.
+    const again = await (await app.fetch(new Request(`${LOCAL}/settings/admin/bot-check`, { headers: { accept: "text/html" } }), s.env, ctx)).text();
+    expect(again).not.toContain("TURNSTILE-PLAINTEXT-1");
+    expect(again).not.toContain("CAP-PLAINTEXT-1");
+    expect(again).toContain('value="0x4AAAAAAAsaved"');
+  });
+
+  it("the Bot check POSTs need a site administrator and a CSRF token", async () => {
+    const s = setup({ PUBLIC_URL: LOCAL, TURNSTILE_SITE_KEY: "site", TURNSTILE_SECRET: "secret" });
+    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+    const token = "csrf-token-for-the-bot-check-4";
+    const send = (path: string, cookie: string, csrf: string) => {
+      const body = new URLSearchParams({ provider: "turnstile", _csrf: csrf }).toString();
+      return app.fetch(new Request(`${LOCAL}${path}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "content-length": String(body.length), accept: "text/html", cookie }, body }), s.env, ctx);
+    };
+    // Without the CSRF cookie/token pair, nothing changes.
+    expect((await send("/settings/admin/bot-check", "", "nope")).status).toBe(403);
+    // A valid pair but no session: signed out is not a site administrator (401 sign-in required, 403 for the rest).
+    expect([401, 403]).toContain((await send("/settings/admin/bot-check", `dfy_csrf=${token}`, token)).status);
+    expect((await readRegistrationPolicy(s.env)).provider).toBe("auto");
+  });
+
   it("a cap.js server must be https (or loopback) and a site key must look like one", () => {
     expect(normalCapEndpoint("http://cap.example.com")).toBeNull();
     expect(normalCapEndpoint("https://cap.example.com/")).toBe("https://cap.example.com");
     expect(normalCapEndpoint("http://localhost:3000")).toBe("http://localhost:3000");
     expect(normalCapEndpoint("javascript:alert(1)")).toBeNull();
+    expect(normalCapEndpoint("https://cap.example.com/?x=1")).toBeNull();
     expect(normalCapSiteKey("ab")).toBeNull();
     expect(normalCapSiteKey("space key")).toBeNull();
     expect(normalCapSiteKey("AbC123")).toBe("AbC123");

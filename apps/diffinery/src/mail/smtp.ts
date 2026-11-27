@@ -1,14 +1,17 @@
 import { connect } from "cloudflare:sockets";
 import type { Env } from "../env.js";
+import { decryptAndReseal } from "../lib/crypto.js";
 import type { Outgoing } from "./send.js";
 
 /**
  * Sending over SMTP, for an instance without Cloudflare Email Sending (the EMAIL binding), such as
- * one on celld. SMTP_URL names the server and the user and SMTP_PASSWORD (a secret) the password:
- * `smtps://user@host:465` is TLS from the first byte, and `smtp://user@host:587` upgrades with
- * STARTTLS and refuses to go on without it, so the password never crosses the network in the clear.
- * Each email is one TCP connection (`cloudflare:sockets`, which celld provides too). Nothing of the
- * conversation is logged; errors carry the server's replies, never the commands sent.
+ * one on celld. `smtps://user@host:465` is TLS from the first byte, and `smtp://user@host:587`
+ * upgrades with STARTTLS and refuses to go on without it, so the password never crosses the network
+ * in the clear. The server and user come from SMTP_URL with SMTP_PASSWORD (a secret) as the
+ * password, or from Settings → Site administration → Email, which wins when it is complete and
+ * seals the password with MASTER_KEY. Each email is one TCP connection (`cloudflare:sockets`,
+ * which celld provides too). Nothing of the conversation is logged; errors carry the server's
+ * replies, never the commands sent.
  */
 
 export interface SmtpConfig {
@@ -68,6 +71,61 @@ export function smtpConfig(env: Pick<Env, "SMTP_URL" | "SMTP_PASSWORD">): SmtpCo
 /** SMTP_URL as an administrator may see it: scheme, user, host and port. */
 export const smtpLabel = (c: SmtpConfig): string =>
   `${c.tls === "implicit" ? "smtps" : "smtp"}://${c.user ? `${encodeURIComponent(c.user)}@` : ""}${c.host.includes(":") ? `[${c.host}]` : c.host}:${c.port}${c.tls === "starttls" ? " (STARTTLS)" : ""}`;
+
+/** What a site administrator saved (smtp_settings, migration 0048). The password is sealed. */
+export interface SmtpSettings {
+  /** `smtps://user@host:465`, or null. Never carries a password. */
+  url: string | null;
+  /** Sealed envelope, or null. Never sent to a page. */
+  sealedPassword: string | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export const EMPTY_SMTP_SETTINGS: SmtpSettings = Object.freeze({ url: null, sealedPassword: null, updatedAt: null, updatedBy: null });
+
+type SettingsRow = { smtp_url: string | null; smtp_password: string | null; updated_at: string | null; updated_by: string | null };
+
+/** The saved SMTP settings (empty when the table has no row, which is the default). */
+export async function readSmtpSettings(env: Pick<Env, "DB">): Promise<SmtpSettings> {
+  try {
+    const row = await env.DB.prepare("SELECT * FROM smtp_settings WHERE id = 1").first<SettingsRow>();
+    return row ? { url: row.smtp_url, sealedPassword: row.smtp_password, updatedAt: row.updated_at, updatedBy: row.updated_by } : EMPTY_SMTP_SETTINGS;
+  } catch (e) {
+    if (!/no such table/i.test(String(e))) throw e;
+    return EMPTY_SMTP_SETTINGS;
+  }
+}
+
+/** A complete SMTP setup: where to connect, how, and with what. */
+export interface SmtpConfiguration {
+  config: SmtpConfig;
+  /** "settings" when a site administrator saved it, "environment" when it came from the deployment. */
+  source: "settings" | "environment";
+}
+
+/**
+ * SMTP as this instance has it: the saved server when there is one, else SMTP_URL and
+ * SMTP_PASSWORD, else null (nothing configured) or what is wrong with what was saved.
+ */
+export async function smtpConfiguration(env: Pick<Env, "DB" | "MASTER_KEY" | "MASTER_KEY_PREV" | "SMTP_URL" | "SMTP_PASSWORD">): Promise<SmtpConfiguration | { error: string } | null> {
+  const saved = await readSmtpSettings(env);
+  if (saved.url?.trim()) {
+    let password: string | null = null;
+    if (saved.sealedPassword) {
+      const envelope = saved.sealedPassword;
+      password = await decryptAndReseal(env, "smtp", envelope, (sealed) => env.DB.prepare("UPDATE smtp_settings SET smtp_password = ? WHERE id = 1 AND smtp_password = ?").bind(sealed, envelope).run()).catch(() => null);
+      // Without MASTER_KEY (or with the wrong one) the saved password can't be used: say so rather than try without it.
+      if (password === null) return { error: "the saved SMTP password can't be opened with this MASTER_KEY; save it again in Settings → Email" };
+    }
+    const config = smtpConfig({ SMTP_URL: saved.url, SMTP_PASSWORD: password ?? undefined });
+    if (!config) return null;
+    return "error" in config ? config : { config, source: "settings" };
+  }
+  const config = smtpConfig(env);
+  if (!config) return null;
+  return "error" in config ? config : { config, source: "environment" };
+}
 
 /** How long to wait for each reply, and for each write. */
 export const SMTP_TIMEOUT_MS = 30_000;

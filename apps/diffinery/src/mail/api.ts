@@ -177,7 +177,7 @@ mailApi.get("/diffinery/admin/email", async (c) => {
   siteAdmin(c, "read");
   const store = new MailStore(c.env.DB);
   const [day, last] = await Promise.all([store.counts(new Date(Date.now() - 86400_000).toISOString()), store.recent({ limit: 1 })]);
-  const t = mailTransport(c.env);
+  const t = await mailTransport(c.env);
   const smtp = t?.kind === "smtp" ? ("error" in t ? { url: null, error: t.error } : { url: smtpLabel(t.config), error: null }) : null;
   return c.json({
     sending: !!t && !(t.kind === "smtp" && "error" in t),

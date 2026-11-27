@@ -24,7 +24,7 @@ import type { Account, Directory } from "../lib/directory.js";
 import { readInstanceSettings } from "../lib/instance.js";
 import { HttpError, now } from "../lib/util.js";
 import { mailTransport } from "../mail/send.js";
-import { CAPTCHA_PROVIDERS, captchaProblem, capConfiguration, resolveCaptcha, type Captcha, type CaptchaProviderChoice } from "./captcha.js";
+import { CAPTCHA_PROVIDERS, captchaProblem, capConfiguration, resolveCaptcha, turnstileConfiguration, type Captcha, type CaptchaProviderChoice } from "./captcha.js";
 import { signupOpen } from "./signup.js";
 
 /** The ways in that can be switched on separately. Invitations are not one of them: they always work. */
@@ -112,7 +112,7 @@ export interface Registration {
   configured: SignupMethod[];
   /** The ways in offered now: configured, minus those this instance can't run (no email transport). */
   methods: SignupMethod[];
-  /** Whether this instance can send email at all (an EMAIL binding, or a usable SMTP_URL). */
+  /** Whether this instance can send email at all (an EMAIL binding, or a usable SMTP setup). */
   email: boolean;
   /** Whether opening registration waits for an email transport (production, unless the page says otherwise). */
   emailRequired: boolean;
@@ -123,10 +123,10 @@ export interface Registration {
   blockedBy: "captcha" | "email" | "methods" | null;
 }
 
-/** Whether this instance can send the mail a sign-up needs: an EMAIL binding, or a usable SMTP_URL. */
-export function emailTransport(env: Pick<Env, "EMAIL" | "SMTP_URL" | "SMTP_PASSWORD">): boolean {
-  const t = mailTransport(env);
-  // A malformed SMTP_URL is as good as none: nothing would leave.
+/** Whether this instance can send the mail a sign-up needs: an EMAIL binding, or a usable SMTP setup. */
+export async function emailTransport(env: Env): Promise<boolean> {
+  const t = await mailTransport(env);
+  // A malformed SMTP URL is as good as none: nothing would leave.
   return !!t && !("error" in t);
 }
 
@@ -135,9 +135,12 @@ export async function registrationPolicy(env: Env): Promise<Registration> {
   const policy = await readRegistrationPolicy(env);
   const instance = await readInstanceSettings(env);
   const forcedByEnv = signupOpen(env);
-  const email = emailTransport(env);
-  const cap = policy.provider === "cap" || policy.provider === "auto" ? await capConfiguration(env) : null;
-  const captcha = resolveCaptcha(env, policy.provider, cap);
+  const email = await emailTransport(env);
+  // Both providers live in one row; only the one the policy can choose is read (and decrypted).
+  const wantsCap = policy.provider === "cap" || policy.provider === "auto";
+  const wantsTurnstile = policy.provider === "turnstile" || policy.provider === "auto";
+  const [cap, turnstile] = await Promise.all([wantsCap ? capConfiguration(env) : null, wantsTurnstile ? turnstileConfiguration(env) : null]);
+  const captcha = resolveCaptcha(env, policy.provider, cap, turnstile);
   // SIGNUP=open adds the emailed code and never removes anything the page switched on.
   const configured = SIGNUP_METHODS.filter((m) => policy.methods.includes(m) || (forcedByEnv && m === "email_code"));
   // The emailed code is the only way in that needs email by itself.
@@ -150,7 +153,7 @@ export async function registrationPolicy(env: Env): Promise<Registration> {
 
 /** The readable reason sign-up stops before anyone can type anything, or null. */
 export function signupProblem(r: Registration): string | null {
-  if (r.blockedBy === "email") return "Registration is on, but nobody can register: this instance has no email transport, so no address can be confirmed. Set SMTP_URL (or the EMAIL binding), or run the instance in demo mode.";
+  if (r.blockedBy === "email") return "Registration is on, but nobody can register: this instance has no email transport, so no address can be confirmed. Set SMTP in Settings → Email (or bind Cloudflare Email Sending), or run the instance in demo mode.";
   if (r.blockedBy === "captcha") return captchaProblem(r.captcha);
   return null;
 }
@@ -177,13 +180,14 @@ export async function requireMethod(env: Env, method: SignupMethod): Promise<Reg
 /**
  * Why a policy can't be saved, or null when it can. The page never promises a way in that can't
  * run: an on switch needs a way in, a production instance needs email to verify an address, and a
- * chosen bot check needs its keys.
+ * chosen bot check needs its keys. `o` is what this instance has now (registrationPolicy's own
+ * answers), so the checks never read the environment twice.
  */
-export function registrationProblem(env: Pick<Env, "EMAIL" | "SMTP_URL" | "SMTP_PASSWORD" | "TURNSTILE_SITE_KEY" | "TURNSTILE_SECRET" | "PUBLIC_URL">, p: RegistrationPolicy, o: { emailRequired: boolean; captcha: Captcha }): string | null {
+export function registrationProblem(p: RegistrationPolicy, o: { email: boolean; emailRequired: boolean; captcha: Captcha }): string | null {
   if (p.enabled && !p.methods.length) return "Choose at least one way for people to register, or turn registration off.";
-  if (p.enabled && o.emailRequired && !emailTransport(env)) return "A production instance needs an email transport before registration can be opened, so an address can be confirmed. Set SMTP_URL (or the EMAIL binding), untick “Require email before registration” on the Instance page, or switch the instance to demo mode.";
+  if (p.enabled && o.emailRequired && !o.email) return "A production instance needs an email transport before registration can be opened, so an address can be confirmed. Set SMTP in Settings → Email (or bind Cloudflare Email Sending), untick “Require email before registration” on the Instance page, or switch the instance to demo mode.";
   if (p.enabled && o.captcha.missing) return `${o.captcha.missing} Set it up, or choose another bot check.`;
-  if (!emailTransport(env) && p.methods.includes("email_code")) return "This instance has no email transport (no EMAIL binding and no SMTP_URL), so it can't email a sign-up code. Untick Emailed code.";
+  if (!o.email && p.methods.includes("email_code")) return "This instance has no email transport (no EMAIL binding, and no SMTP server in Settings → Email), so it can't email a sign-up code. Untick Emailed code.";
   return null;
 }
 
@@ -199,12 +203,17 @@ export function policyFromForm(f: { b(name: string): boolean; all(name: string):
 /**
  * Store a policy and audit the change, with what it was and what it is. One upsert on the single
  * row, so two administrators saving at once leave one row, and the next request reads the result.
+ *
+ * `saveRegistrationPolicy` checks against the instance as it is now, so the caller (the Bot check
+ * page) can change one field and keep the rest.
  */
 export async function saveRegistrationPolicy(env: Env, dir: Pick<Directory, "audit">, next: RegistrationPolicy, by: Pick<Account, "id" | "login">): Promise<RegistrationPolicy> {
   // The checks run against the policy as it will be, including the bot check it now asks for.
   const instance = await readInstanceSettings(env);
-  const cap = next.provider === "cap" || next.provider === "auto" ? await capConfiguration(env) : null;
-  const problem = registrationProblem(env, next, { emailRequired: instance.requireEmailForSignup && instance.mode === "production", captcha: resolveCaptcha(env, next.provider, cap) });
+  const wantsCap = next.provider === "cap" || next.provider === "auto";
+  const wantsTurnstile = next.provider === "turnstile" || next.provider === "auto";
+  const [cap, turnstile, email] = await Promise.all([wantsCap ? capConfiguration(env) : null, wantsTurnstile ? turnstileConfiguration(env) : null, emailTransport(env)]);
+  const problem = registrationProblem(next, { email, emailRequired: instance.requireEmailForSignup && instance.mode === "production", captcha: resolveCaptcha(env, next.provider, cap, turnstile) });
   if (problem) throw new HttpError(422, problem);
   const before = await readRegistrationPolicy(env);
   const at = now();

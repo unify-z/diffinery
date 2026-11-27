@@ -21,9 +21,9 @@ import { ICONS } from "./assets.js";
 import { Form, act, confirmUrl, flash, post, prm, render, statusOf, type WebApp } from "./ui.js";
 import { csrfToken } from "./csrf.js";
 import { validInviteProof } from "../auth/invite-proof.js";
-import { CODE_MINUTES, Signups, normalEmail, turnstileMode } from "../auth/signup.js";
+import { CODE_MINUTES, Signups, normalEmail } from "../auth/signup.js";
 import { METHOD_LABEL, methodProblem, registrationPolicy, requireMethod, signupProblem, type Registration, type SignupMethod } from "../auth/registration.js";
-import { capConfiguration, captchaProblem, verifyCaptcha, verifyTurnstileCaptcha } from "../auth/captcha.js";
+import { checkCaptcha, captchaProblem, turnstileCheck } from "../auth/captcha.js";
 import type { FormData } from "./csrf.js";
 import { enqueueMail } from "../mail/send.js";
 
@@ -306,7 +306,7 @@ function signupEmailPage(c: AppContext, r: Registration, o: SignupForm = {}): Re
   const problem = signupProblem(r);
   return render(
     c,
-    { title: "Create an account", status: problem ? 503 : o.status, botCheck: r.captcha.kind },
+    { title: "Create an account", status: problem ? 503 : o.status, botCheck: r.captcha.kind, botCheckApi: r.captcha.capApiEndpoint },
     <AuthCard title="Create your Diffinery account">
       {problem ? (
         <StepError error={problem} />
@@ -401,7 +401,7 @@ function signupPasskeyStartPage(c: AppContext, r: Registration, o: SignupForm = 
   const problem = signupProblem(r);
   return render(
     c,
-    { title: "Create an account", status: problem ? 503 : o.status, botCheck: r.captcha.kind },
+    { title: "Create an account", status: problem ? 503 : o.status, botCheck: r.captcha.kind, botCheckApi: r.captcha.capApiEndpoint },
     <AuthCard title="Create your Diffinery account">
       {problem ? (
         <StepError error={problem} />
@@ -438,7 +438,7 @@ function signupPasswordPage(c: AppContext, r: Registration, o: SignupForm = {}):
   const problem = signupProblem(r);
   return render(
     c,
-    { title: "Create an account", status: problem ? 503 : o.status, botCheck: r.captcha.kind },
+    { title: "Create an account", status: problem ? 503 : o.status, botCheck: r.captcha.kind, botCheckApi: r.captcha.capApiEndpoint },
     <AuthCard title="Create your Diffinery account">
       {problem ? (
         <StepError error={problem} />
@@ -499,8 +499,7 @@ async function requireBotCheck(c: AppContext, r: Registration, form: FormData, i
   if (problem) throw new HttpError(503, problem);
   if (r.captcha.kind === "none") return;
   const token = form.s(r.captcha.field);
-  const ok = r.captcha.kind === "turnstile" ? await verifyTurnstileCaptcha(c.env, token, ip) : await verifyCaptcha(r.captcha, await capConfiguration(c.env), token, ip);
-  if (!ok) throw new HttpError(403, "We couldn't confirm that you're a person. Please try again.");
+  if (!(await checkCaptcha(c.env, r.captcha, token, ip))) throw new HttpError(403, "We couldn't confirm that you're a person. Please try again.");
 }
 
 /**
@@ -559,6 +558,8 @@ export function registerAuth(web: WebApp): void {
     }
     if (p.type === "account" && p.via !== "dev") return c.redirect(next, 302);
     const registration = await registrationPolicy(c.env);
+    // Early access carries the same bot check: offer it only when it can run.
+    const earlyAccess = (await turnstileCheck(c.env)).mode !== "missing";
     return render(
       c,
       // The pages people land on after signing in mount Kumo islands: fetch the bundle while they sign in.
@@ -590,7 +591,7 @@ export function registerAuth(web: WebApp): void {
             </p>
           ) : (
             <p>
-              New here? Diffinery is invite-only. Open the invite link someone sent you to create your passkey{turnstileMode(c.env) !== "missing" ? <>, or <a href="/early-access">request early access</a></> : null}.
+              New here? Diffinery is invite-only. Open the invite link someone sent you to create your passkey{earlyAccess ? <>, or <a href="/early-access">request early access</a></> : null}.
             </p>
           )}
           {accessConfigured(c) ? (
@@ -944,7 +945,7 @@ export function registerAuth(web: WebApp): void {
   for (const path of ["/signup", "/signup/*"]) {
     web.use(path, async (c, next) => {
       const r = await registrationPolicy(c.env);
-      if (!r.on && c.req.method === "GET" && c.req.path === "/signup" && turnstileMode(c.env) !== "missing") return c.redirect("/early-access", 302);
+      if (!r.on && c.req.method === "GET" && c.req.path === "/signup" && (await turnstileCheck(c.env)).mode !== "missing") return c.redirect("/early-access", 302);
       if (!r.on) throw new HttpError(404, "not found");
       await next();
     });

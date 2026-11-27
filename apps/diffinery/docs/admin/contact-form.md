@@ -50,7 +50,7 @@ Your IP address and the address you typed are never stored in the clear for the 
 
 | Protection | What it does |
 | --- | --- |
-| Cloudflare Turnstile | The "are you a person" check for people who aren't signed in, the same one as the [early access](/docs/accounts/early-access) and security report forms. A deployed instance without Turnstile keys (`TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET`) takes messages only from people who are signed in; on your own machine the check is skipped. |
+| Cloudflare Turnstile | The "are you a person" check for people who aren't signed in, the same one as the [early access](/docs/accounts/early-access) and security report forms. A deployed instance without Turnstile keys (on **Settings → Bot check**, or `TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET`) takes messages only from people who are signed in; on your own machine the check is skipped. |
 | Honeypot and timing | A field people never see, and a signed time stamp: a form that fills the hidden field, comes back within 3 seconds, or carries a missing or forged stamp gets the usual **Check your inbox** page, and nothing is stored or sent. A form left open more than 24 hours asks you to send it again. |
 | Confirmation by email | A message from someone who isn't signed in reaches the team only after its address follows the emailed link, so nobody can write in someone else's name. |
 | Per-minute limit | At most 20 sign-in attempts, security reports, early access requests and contact messages a minute from one network (`RL_AUTH`, see [Rate limits](/docs/reference/rest-api#rate-limits)). |

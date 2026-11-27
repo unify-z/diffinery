@@ -13,7 +13,8 @@ import { Form, Time, WATCH_OPTIONS, act, flash, post, prm, render, repoUrl, type
 import { MailStore, WATCH_LEVELS, type EmailLogRow, type NotificationPrefs, type WatchLevel } from "./prefs.js";
 import { sampleJobs } from "./samples.js";
 import { buildMessage, deliver, enqueueMail, mailTransport, senderAddress } from "./send.js";
-import { smtpLabel } from "./smtp.js";
+import { readSmtpSettings, smtpConfig, smtpConfiguration, smtpLabel } from "./smtp.js";
+import { encryptSecret } from "../lib/crypto.js";
 import type { Category, MailJob } from "./types.js";
 import { readUnsubToken, type UnsubScope, type UnsubToken } from "./unsubscribe.js";
 import { normalEmail } from "../auth/signup.js";
@@ -62,12 +63,16 @@ const requireSiteAdmin = (c: AppContext): Account => {
 };
 
 /** The Sending line on Settings → Email: which transport sends, or why nothing does. */
-function sendingStatus(env: AppContext["env"]): Child {
-  const t = mailTransport(env);
-  if (!t) return <span class="bad">not configured (no EMAIL binding or SMTP_URL): emails are logged, not sent</span>;
+async function sendingStatus(env: AppContext["env"]): Promise<Child> {
+  const t = await mailTransport(env);
+  if (!t) return <span class="bad">not configured (no EMAIL binding or SMTP server): emails are logged, not sent</span>;
   if (t.kind === "email-sending") return <span class="ok">Cloudflare Email Sending is bound</span>;
-  if ("error" in t) return <span class="bad">SMTP_URL is set but can't be used: {t.error}</span>;
-  return <span class="ok">over SMTP: {smtpLabel(t.config)}</span>;
+  if ("error" in t) return <span class="bad">SMTP is set but can't be used: {t.error}</span>;
+  return (
+    <span class="ok">
+      over SMTP: {smtpLabel(t.config)}
+    </span>
+  );
 }
 
 /** One-line description of what an unsubscribe link changes. */
@@ -627,7 +632,7 @@ export function registerMailWeb(web: WebApp): void {
     const store = new MailStore(c.env.DB);
     const t = csrfToken(c);
     const since = new Date(Date.now() - 86400_000).toISOString();
-    const [counts, rows, suppressed] = await Promise.all([store.counts(since), store.recent({ limit: 100 }), new Suppressions(c.env.DB).list()]);
+    const [counts, rows, suppressed, smtpSaved, smtpNow] = await Promise.all([store.counts(since), store.recent({ limit: 100 }), new Suppressions(c.env.DB).list(), readSmtpSettings(c.env), smtpConfiguration(c.env)]);
     const samples = sampleJobs(c.env.PUBLIC_URL, { accountId: me.id }, me.login);
     const pick = samples.find((s) => s.id === c.req.query("sample")) ?? samples[0]!;
     return settingsPage(
@@ -641,7 +646,7 @@ export function registerMailWeb(web: WebApp): void {
           <div class="body">
             <dl class="kv m0">
               <dt>Sending</dt>
-              <dd>{sendingStatus(c.env)}</dd>
+              <dd>{await sendingStatus(c.env)}</dd>
               <dt>Queue</dt>
               <dd>{c.env.MAIL ? "diffinery-mail" : <span class="bad">not bound: emails are dropped</span>}</dd>
               <dt>From</dt>
@@ -665,6 +670,46 @@ export function registerMailWeb(web: WebApp): void {
             <button class="btn">Send every template to me</button>
           </Form>
         </div>
+
+        <h2 id="smtp">SMTP server</h2>
+        <p class="muted">
+          Without Cloudflare Email Sending (the <span class="mono">EMAIL</span> binding), email goes through an SMTP server. Set it here to change it without a deploy: what is saved on this page wins over <span class="mono">SMTP_URL</span> and <span class="mono">SMTP_PASSWORD</span>. Leave the server empty to fall back to those variables.
+        </p>
+        <Form action="/settings/admin/email/smtp" t={t} class="box">
+          <div class="head">
+            <h2>Send over SMTP</h2>
+            {smtpNow ? (
+              "error" in smtpNow ? (
+                <span class="badge red">can't be used</span>
+              ) : smtpNow.source === "settings" ? (
+                <span class="badge green">set here</span>
+              ) : (
+                <span class="badge">from the deployment</span>
+              )
+            ) : (
+              <span class="badge">not set up</span>
+            )}
+          </div>
+          <div class="body fbody">
+            {c.env.EMAIL ? <div class="flash notice">Cloudflare Email Sending is bound, so it sends every email and this server is ignored until the binding is removed.</div> : null}
+            <div class="field">
+              <label for="smtp-url">Server</label>
+              <input id="smtp-url" name="smtp_url" maxlength={300} autocomplete="off" placeholder={c.env.SMTP_URL ? "set in the deployment; type a server here to replace it" : "smtps://user@host:465"} value={smtpSaved.url ?? ""} />
+              <div class="hint">
+                <span class="mono">smtps://</span> uses TLS from the first byte (port 465) and <span class="mono">smtp://</span> upgrades with STARTTLS (port 587). Write an <span class="mono">@</span> in the user as <span class="mono">%40</span>. Keep the password out of it: Diffinery refuses a URL that carries one.
+              </div>
+            </div>
+            <div class="field">
+              <label for="smtp-password">Password</label>
+              <input id="smtp-password" name="smtp_password" type="password" maxlength={400} autocomplete="off" placeholder={smtpSaved.sealedPassword ? "saved; type a new one to replace it" : "the password for that user, if the server needs one"} />
+              <div class="hint">Sealed with MASTER_KEY before it is stored, and never shown again. Leave it empty to keep the one that is saved.</div>
+            </div>
+            <div class="factions">
+              <button class="btn primary">Save SMTP</button>
+              <span class="muted small">Save an empty server to stop using the one saved here. Then send yourself a test email above.</span>
+            </div>
+          </div>
+        </Form>
 
         <h2 id="suppressions">Suppressed addresses</h2>
         <p class="muted">
@@ -775,6 +820,46 @@ export function registerMailWeb(web: WebApp): void {
       return c.text(`${head}\n\n${msg.text}`);
     }
     return c.html(msg.html);
+  });
+
+  post(web, "/settings/admin/email/smtp", async (c, f) => {
+    const me = requireSiteAdmin(c);
+    return act(c, "/settings/admin/email#smtp", async () => {
+      const dir = c.get("dir");
+      const raw = f.s("smtp_url").trim();
+      const password = f.s("smtp_password");
+      if (!raw) {
+        // An empty server turns the saved one off, falling back to the deployment's variables.
+        await c.env.DB.prepare("UPDATE smtp_settings SET smtp_url = NULL, smtp_password = NULL, updated_at = ?, updated_by = ? WHERE id = 1").bind(now(), me.login).run();
+        await dir.audit({ actorId: me.id, actorLogin: me.login, action: "email.smtp.update", detail: { removed: true } });
+        flash(c, "notice", "The saved SMTP server is gone: SMTP_URL and SMTP_PASSWORD apply again.");
+        return;
+      }
+      const saved = await readSmtpSettings(c.env);
+      // A relay that takes no user needs no password; keeping a saved one would make the pair unusable.
+      let namesUser = false;
+      try {
+        namesUser = !!new URL(raw).username;
+      } catch {
+        namesUser = false;
+      }
+      // An empty password keeps the saved one, so the check only has to know that there is one.
+      const keepSaved = !password && namesUser && !!saved.sealedPassword;
+      const check = smtpConfig({ SMTP_URL: raw, SMTP_PASSWORD: password || (keepSaved ? "kept" : undefined) });
+      if (!check || "error" in check) throw new HttpError(422, `That SMTP server can't be used: ${check && "error" in check ? check.error : "enter one like smtps://user@host:465"}.`);
+      const sealed = password && namesUser ? await encryptSecret(c.env, "smtp", password).catch((e: Error) => {
+        throw new HttpError(503, `The password can't be stored: ${e.message || "encryption unavailable"}. Set MASTER_KEY on the deployment and try again.`);
+      }) : null;
+      await c.env.DB.prepare(
+        "INSERT INTO smtp_settings (id, smtp_url, smtp_password, updated_at, updated_by) VALUES (1, ?, ?, ?, ?) " +
+          // Only a kept password survives the save; a server with no user, or a new password, replaces it (and clears it).
+          `ON CONFLICT (id) DO UPDATE SET smtp_url = excluded.smtp_url, smtp_password = ${keepSaved ? "COALESCE(excluded.smtp_password, smtp_settings.smtp_password)" : "excluded.smtp_password"}, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+      )
+        .bind(raw, sealed, now(), me.login)
+        .run();
+      await dir.audit({ actorId: me.id, actorLogin: me.login, action: "email.smtp.update", detail: { url: smtpLabel(check), password: sealed ? "set" : keepSaved ? "unchanged" : "removed" } });
+      flash(c, "notice", `SMTP saved: ${smtpLabel(check)}. Send yourself a test email to check it.`);
+    });
   });
 
   post(web, "/settings/admin/email/samples", async (c) => {

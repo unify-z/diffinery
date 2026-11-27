@@ -178,7 +178,7 @@ export interface Env {
   /**
    * cap.js, a self-hosted proof-of-work CAPTCHA (docs: capjs.js.org): the base URL of its server,
    * e.g. https://cap.example.com. With CAP_SITE_KEY and CAP_SECRET it makes cap.js available as a
-   * bot check; a site administrator can also set the same three in Settings → Registration, which
+   * bot check; a site administrator can also set the same three in Settings → Bot check, which
    * wins. See auth/captcha.ts.
    */
   CAP_ENDPOINT?: string;

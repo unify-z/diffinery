@@ -1,14 +1,22 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { app } from "../../src/app.js";
+import { web } from "../../src/web/routes.js";
 import type { Env } from "../../src/env.js";
 import { deliver, mailTransport, RetryableMailError, type Outgoing } from "../../src/mail/send.js";
-import { formatMessage, sendSmtp, SmtpError, smtpConfig, smtpLabel, type SmtpConfig } from "../../src/mail/smtp.js";
+import { formatMessage, readSmtpSettings, sendSmtp, SmtpError, smtpConfig, smtpConfiguration, smtpLabel, type SmtpConfig } from "../../src/mail/smtp.js";
+import { encryptSecret } from "../../src/lib/crypto.js";
 import { Suppressions } from "../../src/mail/suppression.js";
 import type { MailJob } from "../../src/mail/types.js";
 import { setConnect } from "./stubs/cloudflare-sockets.js";
 import { testD1 } from "./stubs/d1.js";
 
+// index.ts mounts the web UI last; do the same here (it can't load Durable Objects under Node).
+app.route("/", web);
+
 const enc = new TextEncoder();
 const PASSWORD = "hunter2-very-secret";
+/** A MASTER_KEY that encryptSecret accepts: base64 of 32 bytes. */
+const MASTER = btoa(String.fromCharCode(...new Uint8Array(32).fill(5)));
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
 
 type Verb = "STARTTLS" | "AUTH" | "MAIL" | "RCPT" | "DATA" | "END";
@@ -162,6 +170,34 @@ describe("SMTP settings", () => {
     expect(smtpConfig({ SMTP_URL: "smtp://[::1]:1587" })).toMatchObject({ host: "::1", port: 1587 });
   });
 
+  const savedEnv = (vars: Partial<Env> = {}): Env => ({ DB: testD1(), PUBLIC_URL: "https://diffinery.example", MASTER_KEY: MASTER, ...vars }) as unknown as Env;
+
+  it("a server and password saved in Settings beat SMTP_URL, and an empty one falls back to it", async () => {
+    const env = savedEnv({ SMTP_URL: "smtps://env%40diffinery.example@smtp.example", SMTP_PASSWORD: "from-the-deployment" });
+    expect(await readSmtpSettings(env)).toEqual({ url: null, sealedPassword: null, updatedAt: null, updatedBy: null });
+    expect(await smtpConfiguration(env)).toEqual({ config: { ...implicit, user: "env@diffinery.example", password: "from-the-deployment" }, source: "environment" });
+    const sealed = await encryptSecret(env, "smtp", PASSWORD);
+    env.DB.prepare("UPDATE smtp_settings SET smtp_url = ?, smtp_password = ?, updated_by = ? WHERE id = 1").bind("smtps://ann%40diffinery.example@smtp.example", sealed, "root").run();
+    expect(await readSmtpSettings(env)).toMatchObject({ url: "smtps://ann%40diffinery.example@smtp.example", sealedPassword: sealed, updatedBy: "root" });
+    expect(await smtpConfiguration(env)).toEqual({ config: implicit, source: "settings" });
+    // Saving an empty server puts the deployment's variables back in charge.
+    env.DB.prepare("UPDATE smtp_settings SET smtp_url = NULL, smtp_password = NULL WHERE id = 1").run();
+    expect(await smtpConfiguration(env)).toMatchObject({ source: "environment" });
+  });
+
+  it("says so when the saved password can't be opened, instead of sending without it", async () => {
+    const env = savedEnv({ MASTER_KEY: undefined });
+    env.DB.prepare("UPDATE smtp_settings SET smtp_url = ?, smtp_password = ? WHERE id = 1").bind("smtps://ann%40diffinery.example@smtp.example", "v2.dead.beef.cafe").run();
+    expect(await smtpConfiguration(env)).toEqual({ error: expect.stringContaining("can't be opened with this MASTER_KEY") });
+  });
+
+  it("a missing table (a deploy that raced its migration) reads as nothing saved", async () => {
+    const env = savedEnv({ SMTP_URL: "smtps://relay.example:2465" });
+    (env.DB as unknown as { sqlite: { exec: (q: string) => unknown } }).sqlite.exec("DROP TABLE smtp_settings");
+    expect(await readSmtpSettings(env)).toEqual({ url: null, sealedPassword: null, updatedAt: null, updatedBy: null });
+    expect(await smtpConfiguration(env)).toMatchObject({ source: "environment", config: { host: "relay.example", port: 2465 } });
+  });
+
   it("says what is wrong, and never takes a password from the URL", () => {
     expect(smtpConfig({ SMTP_URL: "smtps://ann:pw@smtp.example" })).toEqual({ error: "the password goes in the SMTP_PASSWORD secret, not in SMTP_URL" });
     expect(smtpConfig({ SMTP_URL: "https://smtp.example" })).toEqual({ error: "SMTP_URL must start with smtps:// or smtp://" });
@@ -175,11 +211,12 @@ describe("SMTP settings", () => {
     expect(smtpLabel(starttls)).toBe("smtp://ann%40diffinery.example@smtp.example:587 (STARTTLS)");
   });
 
-  it("prefers the EMAIL binding when both are there", () => {
+  it("prefers the EMAIL binding when both are there", async () => {
     const EMAIL = { send: async () => ({ messageId: "x" }) } as unknown as SendEmail;
-    expect(mailTransport({ EMAIL, SMTP_URL: "smtps://smtp.example" })?.kind).toBe("email-sending");
-    expect(mailTransport({ SMTP_URL: "smtps://smtp.example" })?.kind).toBe("smtp");
-    expect(mailTransport({})).toBeNull();
+    const DB = testD1();
+    expect((await mailTransport({ DB, EMAIL, SMTP_URL: "smtps://smtp.example" }))?.kind).toBe("email-sending");
+    expect((await mailTransport({ DB, SMTP_URL: "smtps://smtp.example" }))?.kind).toBe("smtp");
+    expect(await mailTransport({ DB })).toBeNull();
   });
 });
 
@@ -324,6 +361,17 @@ describe("deliver() over SMTP", () => {
     expect(log()).toEqual([{ to_addr: "ann@example.com", status: "sent", detail: null, message_id: r.messageId }]);
   });
 
+  it("sends through the server saved in Settings, not SMTP_URL", async () => {
+    const f = server();
+    const { env, log } = setup({ MASTER_KEY: MASTER, SMTP_URL: undefined, SMTP_PASSWORD: undefined });
+    const sealed = await encryptSecret(env, "smtp", PASSWORD);
+    env.DB.prepare("UPDATE smtp_settings SET smtp_url = ?, smtp_password = ? WHERE id = 1").bind("smtps://ann%40diffinery.example@smtp.example", sealed).run();
+    const r = await deliver(env, job);
+    expect(r.status).toBe("sent");
+    expect(f.commands).toContain("AUTH PLAIN " + b64(`\u0000ann@diffinery.example\u0000${PASSWORD}`));
+    expect(log()[0]).toMatchObject({ status: "sent", to_addr: "ann@example.com" });
+  });
+
   it("suppresses an address the server says doesn't exist", async () => {
     server({ reply: { RCPT: "550 5.1.1 User unknown" } });
     const { env, log } = setup();
@@ -361,7 +409,84 @@ describe("deliver() over SMTP", () => {
 
   it("skips when neither EMAIL nor SMTP_URL is set", async () => {
     const { env, log } = setup({});
-    expect(await deliver(env, job)).toEqual({ status: "skipped", detail: "no EMAIL binding or SMTP_URL" });
-    expect(log()[0]).toMatchObject({ status: "skipped", detail: "email sending is not configured (no EMAIL binding or SMTP_URL)" });
+    expect(await deliver(env, job)).toEqual({ status: "skipped", detail: "no EMAIL binding or SMTP server" });
+    expect(log()[0]).toMatchObject({ status: "skipped", detail: "email sending is not configured (no EMAIL binding or SMTP server)" });
+  });
+});
+
+describe("SMTP on Settings → Site administration → Email", () => {
+  const at = "2026-10-01T00:00:00.000Z";
+  const LOCAL = "http://localhost:8787";
+  const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+
+  function setup() {
+    const DB = testD1();
+    DB.sqlite.prepare("INSERT INTO accounts (id, login, kind, email, status, site_admin, created_at) VALUES ('u-root', 'root', 'user', 'root@example.com', 'active', 1, ?)").run(at);
+    const env = { DB, PUBLIC_URL: LOCAL, DEV_AUTH: "root@example.com", MASTER_KEY: MASTER } as unknown as Env;
+    const token = "csrf-token-for-the-smtp-form-1";
+    const form = (fields: Record<string, string>) => {
+      const body = new URLSearchParams({ ...fields, _csrf: token }).toString();
+      return app.fetch(new Request(`${LOCAL}/settings/admin/email/smtp`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "content-length": String(body.length), accept: "text/html", cookie: `dfy_csrf=${token}` }, body }), env, ctx);
+    };
+    const get = () => app.fetch(new Request(`${LOCAL}/settings/admin/email`, { headers: { accept: "text/html" } }), env, ctx);
+    return { env, DB, form, get };
+  }
+
+  it("saves a server and seals the password: it wins over SMTP_URL, and an empty password keeps it", async () => {
+    const s = setup();
+    expect((await s.form({ smtp_url: "smtps://ann%40diffinery.example@smtp.example", smtp_password: PASSWORD })).status).toBe(303);
+    const saved = await readSmtpSettings(s.env);
+    expect(saved.url).toBe("smtps://ann%40diffinery.example@smtp.example");
+    expect(saved.sealedPassword).toMatch(/^v2\./);
+    expect(saved.sealedPassword).not.toContain(PASSWORD);
+    expect(saved.updatedBy).toBe("root");
+    expect(await smtpConfiguration(s.env)).toEqual({ config: implicit, source: "settings" });
+    // Saving again without a password keeps the one that is saved.
+    expect((await s.form({ smtp_url: "smtps://ann%40diffinery.example@smtp.example", smtp_password: "" })).status).toBe(303);
+    expect(await readSmtpSettings(s.env)).toMatchObject({ sealedPassword: saved.sealedPassword });
+    expect(await smtpConfiguration(s.env)).toEqual({ config: implicit, source: "settings" });
+    // The page says where the server comes from.
+    const html = await (await s.get()).text();
+    expect(html).toContain('name="smtp_url"');
+    expect(html).toContain("set here");
+  });
+
+  it("refuses a password in the URL, and saves nothing", async () => {
+    const s = setup();
+    expect((await s.form({ smtp_url: "smtps://ann:pw@smtp.example", smtp_password: "" })).status).toBe(303);
+    expect(await readSmtpSettings(s.env)).toMatchObject({ url: null });
+    expect(await smtpConfiguration(s.env)).toBeNull();
+  });
+
+  it("a relay that takes no user drops the saved password, so the pair stays usable", async () => {
+    const s = setup();
+    await s.form({ smtp_url: "smtps://ann%40diffinery.example@smtp.example", smtp_password: PASSWORD });
+    expect(await readSmtpSettings(s.env)).toMatchObject({ sealedPassword: expect.any(String) });
+    expect((await s.form({ smtp_url: "smtps://relay.example:2465", smtp_password: "" })).status).toBe(303);
+    expect(await readSmtpSettings(s.env)).toMatchObject({ url: "smtps://relay.example:2465", sealedPassword: null });
+    expect(await smtpConfiguration(s.env)).toEqual({ config: { host: "relay.example", port: 2465, tls: "implicit", user: null, password: null }, source: "settings" });
+  });
+
+  it("without MASTER_KEY the form says the password can't be stored and saves nothing", async () => {
+    const DB = testD1();
+    DB.sqlite.prepare("INSERT INTO accounts (id, login, kind, email, status, site_admin, created_at) VALUES ('u-root', 'root', 'user', 'root@example.com', 'active', 1, ?)").run(at);
+    const env = { DB, PUBLIC_URL: LOCAL, DEV_AUTH: "root@example.com" } as unknown as Env;
+    const token = "csrf-token-for-the-smtp-form-2";
+    const body = new URLSearchParams({ smtp_url: "smtps://ann%40diffinery.example@smtp.example", smtp_password: PASSWORD, _csrf: token }).toString();
+    const r = await app.fetch(new Request(`${LOCAL}/settings/admin/email/smtp`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "content-length": String(body.length), accept: "text/html", cookie: `dfy_csrf=${token}` }, body }), env, ctx);
+    // The setup's fault, not a bare 500 (act() rethrows 5xx, so the page is an error page).
+    expect(r.status).toBe(503);
+    expect(await readSmtpSettings(env)).toMatchObject({ url: null, sealedPassword: null });
+  });
+
+  it("an empty server falls back to SMTP_URL, and the audit log records both changes", async () => {
+    const s = setup();
+    await s.form({ smtp_url: "smtps://ann%40diffinery.example@smtp.example", smtp_password: PASSWORD });
+    await s.form({ smtp_url: "", smtp_password: "" });
+    expect(await readSmtpSettings(s.env)).toMatchObject({ url: null, sealedPassword: null });
+    expect(s.DB.sqlite.prepare("SELECT action FROM audit_log ORDER BY rowid").all()).toEqual([{ action: "email.smtp.update" }, { action: "email.smtp.update" }]);
+    // Never the password, and never a URL that carries one.
+    const details = s.DB.sqlite.prepare("SELECT detail FROM audit_log ORDER BY rowid").all() as Array<{ detail: string }>;
+    for (const d of details) expect(d.detail).not.toContain("hunter2");
   });
 });

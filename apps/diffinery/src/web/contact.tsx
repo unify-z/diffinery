@@ -2,7 +2,7 @@
 import { raw } from "hono/html";
 import type { Child, FC } from "hono/jsx";
 import { requireAccount, type AppContext } from "../auth/principal.js";
-import { turnstileMode } from "../auth/signup.js";
+import { turnstileCheck } from "../auth/captcha.js";
 import { formStamp } from "../lib/early-access.js";
 import type { Account, Directory } from "../lib/directory.js";
 import {
@@ -43,7 +43,7 @@ import { Form, Pager, Time, act, flash, pageNum, post, principalAccount, prm, qs
 const MAX_FORM_BYTES = 64 * 1024;
 const BASE = "/settings/admin/contact";
 
-const TURNSTILE_MISSING = "This instance has no Turnstile configured (TURNSTILE_SITE_KEY and TURNSTILE_SECRET), so its contact form takes messages only from people who are signed in.";
+const TURNSTILE_MISSING = "This instance has no Turnstile configured (Settings → Bot check, or TURNSTILE_SITE_KEY and TURNSTILE_SECRET), so its contact form takes messages only from people who are signed in.";
 
 export const STATE_TEXT: Record<MessageState, string> = { new: "New", handled: "Handled", spam: "Spam", unconfirmed: "Unconfirmed" };
 const STATE_BADGE: Record<MessageState, string> = { new: "badge blue", handled: "badge green", spam: "badge red", unconfirmed: "badge" };
@@ -76,9 +76,9 @@ const Way: FC<{ icon: string; title: string; children: Child }> = ({ icon, title
 
 async function contactPage(c: AppContext, o: { values?: FormValues; error?: string; status?: number } = {}): Promise<Response> {
   const me = senderOf(c);
-  const mode = turnstileMode(c.env);
-  const siteKey = !me && mode === "verify" ? c.env.TURNSTILE_SITE_KEY : undefined;
-  const closed = !me && mode === "missing";
+  const check = await turnstileCheck(c.env);
+  const siteKey = !me && check.mode === "verify" ? check.siteKey : undefined;
+  const closed = !me && check.mode === "missing";
   const v = o.values ?? {};
   const stamp = me || closed ? "" : await formStamp(c.env);
   const topic = v.topic ?? (isTopic(c.req.query("topic") ?? "") ? c.req.query("topic") : "");

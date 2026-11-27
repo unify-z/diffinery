@@ -1,7 +1,8 @@
 /** @jsxImportSource hono/jsx */
 import type { Child, FC } from "hono/jsx";
 import { requireAccount, type AppContext } from "../auth/principal.js";
-import { turnstileMode, verifyTurnstile } from "../auth/signup.js";
+import { turnstileCheck } from "../auth/captcha.js";
+import { verifyTurnstile } from "../auth/signup.js";
 import type { Account } from "../lib/directory.js";
 import { MAX_AREA, MAX_DETAILS, MAX_NOTE, MAX_SUMMARY, REPORT_STATES, SecurityReports, changeReport, submitReport, validateReport, type ReportState, type SecurityReport } from "../lib/security-reports.js";
 import { HttpError } from "../lib/util.js";
@@ -31,7 +32,7 @@ const reporterOf = (c: AppContext): Account | null => {
   return a && a.kind === "user" && a.status === "active" ? a : null;
 };
 
-const TURNSTILE_MISSING = "This instance has no Turnstile configured (TURNSTILE_SITE_KEY and TURNSTILE_SECRET), so it takes reports only from people who are signed in.";
+const TURNSTILE_MISSING = "This instance has no Turnstile configured (Settings → Bot check, or TURNSTILE_SITE_KEY and TURNSTILE_SECRET), so it takes reports only from people who are signed in.";
 
 interface FormValues {
   summary?: string;
@@ -40,11 +41,11 @@ interface FormValues {
   replyTo?: string;
 }
 
-function reportPage(c: AppContext, o: { values?: FormValues; error?: string; status?: number } = {}): Response | Promise<Response> {
+async function reportPage(c: AppContext, o: { values?: FormValues; error?: string; status?: number } = {}): Promise<Response> {
   const me = reporterOf(c);
-  const mode = turnstileMode(c.env);
-  const siteKey = !me && mode === "verify" ? c.env.TURNSTILE_SITE_KEY : undefined;
-  const closed = !me && mode === "missing";
+  const check = await turnstileCheck(c.env);
+  const siteKey = !me && check.mode === "verify" ? check.siteKey : undefined;
+  const closed = !me && check.mode === "missing";
   const others = contactUris(c.env.SECURITY_CONTACT);
   const v = o.values ?? {};
   return render(
@@ -153,9 +154,9 @@ export function registerSecurityReports(web: WebApp): void {
         const ip = c.req.header("cf-connecting-ip") ?? null;
         if (!me) {
           // The same check as open sign-up: Turnstile when configured, none in local development, refused otherwise.
-          const mode = turnstileMode(c.env);
-          if (mode === "missing") throw new HttpError(503, TURNSTILE_MISSING);
-          if (mode === "verify" && !(await verifyTurnstile(c.env.TURNSTILE_SECRET!, f.s("cf-turnstile-response"), ip))) throw new HttpError(403, "We couldn't confirm that you're a person. Please try again.");
+          const check = await turnstileCheck(c.env);
+          if (check.mode === "missing") throw new HttpError(503, TURNSTILE_MISSING);
+          if (check.mode === "verify" && !(await verifyTurnstile(check.secret, f.s("cf-turnstile-response"), ip))) throw new HttpError(403, "We couldn't confirm that you're a person. Please try again.");
         }
         const input = validateReport(values, !!me);
         const r = await submitReport(c.env, (e) => c.get("dir").audit(e), input, me, ip);

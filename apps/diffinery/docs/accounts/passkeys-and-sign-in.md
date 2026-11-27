@@ -241,7 +241,7 @@ If your browser offers several places to save the passkey when you create it, pi
 | "this invite is invalid, already used, or expired" | Ask the person who invited you for a new invite. |
 | "That code has expired or was entered wrong too many times. Send a new code." | Sign-up codes last 10 minutes and allow 5 tries. Click **send a new code**. |
 | "We have sent several codes to <address> today." | At most 5 sign-up codes a day go to one address. Check your spam folder, or try again tomorrow. |
-| "Sign-up needs Turnstile configured" | The instance turned on open sign-up without Turnstile keys. Ask its administrators for an invite. |
+| "This instance is set to check sign-ups with Cloudflare Turnstile, but it has no TURNSTILE_SITE_KEY and TURNSTILE_SECRET." (or the same for cap.js) | The instance turned on open sign-up without that bot check's keys. Ask its administrators for an invite, or tell them to set it up under **Settings → Site administration → Bot check**. |
 | "this sign-in link is invalid, already used, or expired" | Sign-in links work once within 24 hours. Ask a site administrator for a new one. |
 | "Waiting for an invite" page after email recovery | Your email address has no Diffinery account. Ask someone to invite that address, or click **Request access**. |
 | Lost every passkey | Use [email recovery](#email-recovery-through-authaccess) if the sign-in page offers it, otherwise ask a site administrator for a [sign-in link](#sign-in-link-from-an-administrator). |

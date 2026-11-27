@@ -69,7 +69,7 @@ Your IP address and the address you typed are never stored in the clear for the 
 
 | Protection | What it does |
 | --- | --- |
-| Cloudflare Turnstile | The "are you a person" check, the same one the [security report form](/docs/security/disclosure) uses. A deployed instance without Turnstile keys (`TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET`) doesn't show the form; on your own machine the check is skipped. |
+| Cloudflare Turnstile | The "are you a person" check, the same one the [security report form](/docs/security/disclosure) uses. A deployed instance without Turnstile keys (on **Settings → Bot check**, or `TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET`) doesn't show the form; on your own machine the check is skipped. |
 | Honeypot and timing | A field people never see, and a signed time stamp: a form that fills the hidden field, comes back within 3 seconds, or carries a missing or forged stamp gets the usual **Check your inbox** page and nothing is stored or sent. A form left open more than 24 hours asks you to send it again. |
 | Per-minute limit | At most 20 sign-in attempts, security reports and early access requests a minute from one network (`RL_AUTH`, see [Rate limits](/docs/reference/rest-api#rate-limits)). |
 | Daily limits | At most 10 submissions from one IP address, 3 emails to one address, and 500 emails from the form in total, in 24 hours. Past the network limit you see "Too many requests from your network today"; past the other two the page looks the same and no email is sent. |

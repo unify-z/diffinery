@@ -3,9 +3,9 @@
  * Settings → Site administration: Registration, and Instance.
  *
  * **Registration** (auth/registration.ts) decides who may create an account: the switch, the ways
- * in, the status of a new account, and the bot check in front of the forms (Cloudflare Turnstile,
- * cap.js, or none). It also takes a cap.js server's address, site key and secret, so cap.js can be
- * turned on without a deploy; the secret is sealed with MASTER_KEY before it is stored.
+ * in and the status of a new account. The bot check in front of the forms (Cloudflare Turnstile,
+ * cap.js or none) and the keys for both providers are on Settings → Bot check (web/bot-check.tsx),
+ * so both providers are edited in one place; this page says which one is in force.
  *
  * **Instance** (lib/instance.ts) decides what this instance advertises: demo mode says it is
  * Diffinery and links to the project; production mode hides every trace of the project's marketing
@@ -14,12 +14,9 @@
  * Kumo components only (KCheckbox, KSelect), never a native checkbox or select (AGENTS.md).
  */
 import type { Child, FC } from "hono/jsx";
-import { HttpError } from "../lib/util.js";
 import type { Account } from "../lib/directory.js";
-import { encryptSecret } from "../lib/crypto.js";
 import type { AppContext } from "../auth/principal.js";
-import { METHOD_LABEL, SIGNUP_METHODS, policyFromForm, registrationPolicy, registrationSummary, saveRegistrationPolicy, type Registration, type SignupMethod } from "../auth/registration.js";
-import { CAPTCHA_PROVIDERS, PROVIDER_LABEL, capConfiguration, normalCapEndpoint, normalCapSiteKey, readCapSettings } from "../auth/captcha.js";
+import { METHOD_LABEL, SIGNUP_METHODS, policyFromForm, readRegistrationPolicy, registrationPolicy, registrationSummary, saveRegistrationPolicy, type Registration, type SignupMethod } from "../auth/registration.js";
 import { INSTANCE_MODES, MODE_LABEL, MODE_NOTE, instanceSummary, readInstanceSettings, saveInstanceSettings } from "../lib/instance.js";
 import { csrfToken } from "./csrf.js";
 import { KCheckbox, KSelect } from "./kumo.js";
@@ -27,7 +24,7 @@ import { Form, Time, post, act, type WebApp } from "./ui.js";
 import type { SettingsTab } from "./account.js";
 
 const METHOD_NOTE: Record<SignupMethod, string> = {
-  email_code: "Someone enters their address, gets a 6-digit code by email, then picks a username and creates a passkey. Needs email (an EMAIL binding or SMTP_URL).",
+  email_code: "Someone enters their address, gets a 6-digit code by email, then picks a username and creates a passkey. Needs email (SMTP on Settings → Email, or the EMAIL binding).",
   passkey: "Someone picks a username and creates a passkey on the sign-up page. No email is sent, so the address is not confirmed: it doesn't make a bootstrap administrator or accept invitations, and the page tells whether an address already has an account.",
   password: "Someone picks a username and a password. No email is sent, so the address is not confirmed, as with Passkey. Add a passkey later from Settings → Passkeys and sessions.",
 };
@@ -40,7 +37,7 @@ const STATUS_OPTIONS = [
 const MODE_OPTIONS = INSTANCE_MODES.map((m) => ({ value: m, label: MODE_LABEL[m] }));
 
 /** The page body: the policy as stored, what applies now, and why a way in may be off. */
-export const RegistrationAdmin: FC<{ r: Registration; t: string; cap: Awaited<ReturnType<typeof capConfiguration>>; saved: boolean; savedAt: string | null; savedBy: string | null }> = ({ r, t, cap, saved, savedAt, savedBy }) => {
+export const RegistrationAdmin: FC<{ r: Registration; t: string }> = ({ r, t }) => {
   const p = r.policy;
   return (
     <>
@@ -92,16 +89,16 @@ export const RegistrationAdmin: FC<{ r: Registration; t: string; cap: Awaited<Re
           </div>
 
           <div class="field">
-            <label for="provider">Bot check on the sign-up forms</label>
-            <KSelect id="provider" name="provider" label="Bot check" block value={p.provider} options={CAPTCHA_PROVIDERS.map((v) => ({ value: v, label: PROVIDER_LABEL[v] }))} />
+            <label>Bot check</label>
             <div class="hint">
               {r.captcha.kind === "none" ? (
-                <span class="badge">No check: rate limits and the daily email limits still apply.</span>
+                <span class="badge">No check on the sign-up forms: rate limits and the daily email limits still apply.</span>
               ) : r.captcha.kind === "cap" ? (
-                <span class="badge green">cap.js is on{cap ? ` (${cap.source === "settings" ? "set here" : "from the deployment"})` : ""}.</span>
+                <span class="badge green">cap.js checks the sign-up forms.</span>
               ) : (
-                <span class="badge green">Turnstile is on.</span>
-              )}
+                <span class="badge green">Cloudflare Turnstile checks the sign-up forms.</span>
+              )}{" "}
+              <a href="/settings/admin/bot-check">Set up the bot check</a>: which provider runs, and the keys for Turnstile and cap.js.
               {r.captcha.missing ? (
                 <>
                   {" "}
@@ -117,49 +114,14 @@ export const RegistrationAdmin: FC<{ r: Registration; t: string; cap: Awaited<Re
         </div>
       </Form>
 
-      <Form action="/settings/admin/registration/cap" t={t} class="box">
-        <div class="head">
-          <h2>cap.js server</h2>
-          {cap ? <span class="badge green">{cap.source === "settings" ? "set here" : "from the deployment"}</span> : <span class="badge">not set up</span>}
-        </div>
-        <div class="body fbody">
-          <p class="muted m0">
-            <a href="https://capjs.js.org">cap.js</a> is a self-hosted proof-of-work CAPTCHA: no Google, nothing loaded from Cloudflare, and it runs on your own machine. Point it at your capd server, with a site key from its dashboard and that key's secret (not the capd <span class="mono">ADMIN_KEY</span>). Saved here, it applies without a deploy and wins over <span class="mono">CAP_ENDPOINT</span>, <span class="mono">CAP_SITE_KEY</span> and <span class="mono">CAP_SECRET</span>.
-          </p>
-          <div class="frow">
-            <div class="field grow">
-              <label for="cap-endpoint">Server</label>
-              <input id="cap-endpoint" name="cap_endpoint" type="url" maxlength={300} placeholder="https://cap.example.com" value={cap?.source === "settings" ? cap.endpoint : ""} />
-            </div>
-            <div class="field">
-              <label for="cap-site-key">Site key</label>
-              <input id="cap-site-key" name="cap_site_key" maxlength={80} placeholder="the key, not the ADMIN_KEY" value={cap?.source === "settings" ? cap.siteKey : ""} />
-            </div>
-          </div>
-          <div class="field">
-            <label for="cap-secret">Secret</label>
-            <input id="cap-secret" name="cap_secret" type="password" maxlength={200} autocomplete="off" placeholder={cap?.source === "settings" ? "saved; type a new one to replace it" : "the site key's secret"} />
-            <div class="hint">Sealed with MASTER_KEY before it is stored, and never shown again. Leave it empty to keep the one that is saved.</div>
-          </div>
-          <div class="factions">
-            <button class="btn primary">Save cap.js</button>
-            {cap?.source === "settings" ? (
-              <span class="muted small">
-                To stop using it, choose another bot check above, or save an empty server here.
-              </span>
-            ) : null}
-          </div>
-        </div>
-      </Form>
-
       <div class="box">
         <div class="head">
           <h2>Last saved</h2>
         </div>
         <div class="body">
-          {saved && savedAt ? (
+          {r.policy.updatedAt ? (
             <p class="m0">
-              Saved by <b>{savedBy ?? "a site administrator"}</b> <Time at={savedAt} />.
+              Saved by <b>{r.policy.updatedBy ?? "a site administrator"}</b> <Time at={r.policy.updatedAt} />.
             </p>
           ) : (
             <p class="m0 muted">Never saved: registration is closed, as it has always been on this instance.</p>
@@ -201,7 +163,7 @@ export const InstanceAdmin: FC<{ mode: "demo" | "production"; requireEmailForSig
             description={
               email
                 ? "On: Settings → Registration refuses to open sign-up until this instance can email a sign-up code, so an address can be confirmed. Your instance has email set up, so this changes nothing today."
-                : "On: Settings → Registration refuses to open sign-up until this instance can email a sign-up code (SMTP_URL or the EMAIL binding). Off lets people register without any email, which only suits a demo."
+                : "On: Settings → Registration refuses to open sign-up until this instance can email a sign-up code (an SMTP server on Settings → Email, or the EMAIL binding). Off lets people register without any email, which only suits a demo."
             }
           />
         </div>
@@ -246,14 +208,15 @@ export const InstanceAdmin: FC<{ mode: "demo" | "production"; requireEmailForSig
 );
 
 type PageFn = (c: AppContext, me: Account, tab: SettingsTab, title: string, body: Child, status?: number) => Response | Promise<Response>;
+/** The site-administration page shell (account.tsx), shared by Registration, Instance and Bot check. */
+export type AdminPage = PageFn;
 
 /** Routes for Registration and Instance. They share the site-administration page shell (account.tsx). */
 export function registerRegistrationAdmin(web: WebApp, { requireSiteAdmin, page }: { requireSiteAdmin: (c: AppContext) => Account; page: PageFn }): void {
   web.get("/settings/admin/registration", async (c) => {
     const me = requireSiteAdmin(c);
     const r = await registrationPolicy(c.env);
-    const [cap, saved] = await Promise.all([capConfiguration(c.env), readCapSettings(c.env)]);
-    return page(c, me, "registration", "Registration", <RegistrationAdmin r={r} t={csrfToken(c)} cap={cap} saved={!!saved.updatedAt || r.policy.updatedAt !== null} savedAt={r.policy.updatedAt} savedBy={r.policy.updatedBy} />);
+    return page(c, me, "registration", "Registration", <RegistrationAdmin r={r} t={csrfToken(c)} />);
   });
 
   post(web, "/settings/admin/registration", async (c, f) => {
@@ -262,43 +225,11 @@ export function registerRegistrationAdmin(web: WebApp, { requireSiteAdmin, page 
       c,
       "/settings/admin/registration",
       async () => {
-        await saveRegistrationPolicy(c.env, c.get("dir"), policyFromForm(f), me);
+        // The bot check is edited on Settings → Bot check: keep the stored provider here.
+        const current = await readRegistrationPolicy(c.env);
+        await saveRegistrationPolicy(c.env, c.get("dir"), { ...policyFromForm(f), provider: current.provider }, me);
       },
       "Registration saved. It applies to the next request.",
-    );
-  });
-
-  // cap.js: stored here so it can be turned on without a deploy. The secret is sealed, never echoed.
-  post(web, "/settings/admin/registration/cap", async (c, f) => {
-    const me = requireSiteAdmin(c);
-    return act(
-      c,
-      "/settings/admin/registration",
-      async () => {
-        const endpointRaw = f.s("cap_endpoint").trim();
-        const keyRaw = f.s("cap_site_key").trim();
-        const secret = f.s("cap_secret").trim();
-        const dir = c.get("dir");
-        if (!endpointRaw && !keyRaw) {
-          // An empty server turns the saved one off, falling back to the deployment's variables.
-          await c.env.DB.prepare("UPDATE captcha_settings SET cap_endpoint = NULL, cap_site_key = NULL, cap_secret = NULL, updated_at = ?, updated_by = ? WHERE id = 1").bind(new Date().toISOString(), me.login).run();
-          await dir.audit({ actorId: me.id, actorLogin: me.login, action: "captcha.settings.update", detail: { provider: "cap", removed: true } });
-          return;
-        }
-        const endpoint = normalCapEndpoint(endpointRaw);
-        if (!endpoint) throw new HttpError(422, "The cap.js server must be an https address, like https://cap.example.com.");
-        const siteKey = normalCapSiteKey(keyRaw);
-        if (!siteKey) throw new HttpError(422, "The cap.js site key is a short token from the capd dashboard, like AbC123.");
-        const sealed = secret ? await encryptSecret(c.env, "captcha:cap", secret) : null;
-        await c.env.DB.prepare(
-          "INSERT INTO captcha_settings (id, cap_endpoint, cap_site_key, cap_secret, updated_at, updated_by) VALUES (1, ?, ?, COALESCE(?, cap_secret), ?, ?) " +
-            "ON CONFLICT (id) DO UPDATE SET cap_endpoint = excluded.cap_endpoint, cap_site_key = excluded.cap_site_key, cap_secret = COALESCE(excluded.cap_secret, captcha_settings.cap_secret), updated_at = excluded.updated_at, updated_by = excluded.updated_by",
-        )
-          .bind(endpoint, siteKey, sealed, new Date().toISOString(), me.login)
-          .run();
-        await dir.audit({ actorId: me.id, actorLogin: me.login, action: "captcha.settings.update", detail: { provider: "cap", endpoint, siteKey, secret: secret ? "set" : "unchanged" } });
-      },
-      "cap.js saved. It applies to the next sign-up.",
     );
   });
 

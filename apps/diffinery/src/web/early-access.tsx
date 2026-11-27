@@ -2,7 +2,8 @@
 import { raw } from "hono/html";
 import type { Child, FC } from "hono/jsx";
 import { requireAccount, type AppContext } from "../auth/principal.js";
-import { turnstileMode, verifyTurnstile } from "../auth/signup.js";
+import { turnstileCheck } from "../auth/captcha.js";
+import { verifyTurnstile } from "../auth/signup.js";
 import type { Account, Directory } from "../lib/directory.js";
 import {
   CONFIRM_HOURS,
@@ -50,7 +51,7 @@ import { Form, Pager, Time, act, flash, pageNum, post, prm, qs, render, statusOf
 const MAX_FORM_BYTES = 32 * 1024;
 const BASE = "/settings/admin/early-access";
 
-const TURNSTILE_MISSING = "This instance has no Turnstile configured (TURNSTILE_SITE_KEY and TURNSTILE_SECRET), so it can't take early access requests from the web yet. Ask someone who uses it for an invitation.";
+const TURNSTILE_MISSING = "This instance has no Turnstile configured (Settings → Bot check, or TURNSTILE_SITE_KEY and TURNSTILE_SECRET), so it can't take early access requests from the web yet. Ask someone who uses it for an invitation.";
 
 export const STATE_TEXT: Record<RequestState, string> = { confirmed: "Confirmed", unconfirmed: "Unconfirmed", invited: "Invited", declined: "Declined" };
 const STATE_BADGE: Record<RequestState, string> = { confirmed: "badge blue", unconfirmed: "badge", invited: "badge green", declined: "badge red" };
@@ -77,10 +78,10 @@ const Point: FC<{ icon: string; title: string; children: Child }> = ({ icon, tit
 );
 
 async function requestPage(c: AppContext, o: { values?: FormValues; error?: string; status?: number } = {}): Promise<Response> {
-  const mode = turnstileMode(c.env);
-  const siteKey = mode === "verify" ? c.env.TURNSTILE_SITE_KEY : undefined;
+  const check = await turnstileCheck(c.env);
+  const siteKey = check.mode === "verify" ? check.siteKey : undefined;
   const v = o.values ?? {};
-  const stamp = mode === "missing" ? "" : await formStamp(c.env);
+  const stamp = check.mode === "missing" ? "" : await formStamp(c.env);
   return render(
     c,
     { title: "Request early access", status: o.status, botCheck: siteKey ? "turnstile" : undefined, description: "This Diffinery instance is invite-only. Ask its administrators for an invitation." },
@@ -112,7 +113,7 @@ async function requestPage(c: AppContext, o: { values?: FormValues; error?: stri
       </section>
       <div class="box ea-card">
         <div class="body">
-          {mode === "missing" ? (
+          {check.mode === "missing" ? (
             <p class="m0">
               {TURNSTILE_MISSING} Already invited? <a href="/login">Sign in</a>.
             </p>
@@ -316,12 +317,12 @@ async function withAccounts(db: D1Database, rows: EarlyAccessRequest[]): Promise
  * keep nothing), and the Turnstile token is good.
  */
 export async function guard(c: AppContext, f: FormData, missing = TURNSTILE_MISSING): Promise<"ok" | "silent"> {
-  const mode = turnstileMode(c.env);
-  if (mode === "missing") throw new HttpError(503, missing);
+  const check = await turnstileCheck(c.env);
+  if (check.mode === "missing") throw new HttpError(503, missing);
   const stamp = await checkStamp(c.env, f.s("stamp"));
   if (f.s("website") !== "" || stamp === "fast" || stamp === "bad") return "silent";
   if (stamp === "stale") throw new HttpError(422, "This form was open for a long time. Please check it and send it again.");
-  if (mode === "verify" && !(await verifyTurnstile(c.env.TURNSTILE_SECRET!, f.s("cf-turnstile-response"), c.req.header("cf-connecting-ip") ?? null))) throw new HttpError(403, "We couldn't confirm that you're a person. Please try again.");
+  if (check.mode === "verify" && !(await verifyTurnstile(check.secret, f.s("cf-turnstile-response"), c.req.header("cf-connecting-ip") ?? null))) throw new HttpError(403, "We couldn't confirm that you're a person. Please try again.");
   return "ok";
 }
 
@@ -341,9 +342,9 @@ export const Protections: FC<{ stamp: string; siteKey?: string }> = ({ stamp, si
 // ---------------------------------------------------------------- removing your own request
 
 async function removePage(c: AppContext, o: { email?: string; error?: string; status?: number } = {}): Promise<Response> {
-  const mode = turnstileMode(c.env);
-  const siteKey = mode === "verify" ? c.env.TURNSTILE_SITE_KEY : undefined;
-  const stamp = mode === "missing" ? "" : await formStamp(c.env);
+  const check = await turnstileCheck(c.env);
+  const siteKey = check.mode === "verify" ? check.siteKey : undefined;
+  const stamp = check.mode === "missing" ? "" : await formStamp(c.env);
   return render(
     c,
     { title: "Remove your early access request", status: o.status, botCheck: siteKey ? "turnstile" : undefined },
@@ -352,7 +353,7 @@ async function removePage(c: AppContext, o: { email?: string; error?: string; st
       <p class="muted">We'll email the address a link that deletes its request and everything stored about it. Nothing is deleted until the link is opened, so nobody else can remove your request.</p>
       <div class="box ea-card">
         <div class="body">
-          {mode === "missing" ? (
+          {check.mode === "missing" ? (
             <p class="m0">{TURNSTILE_MISSING}</p>
           ) : (
             <Form action="/early-access/remove" t={csrfToken(c)}>
