@@ -15,6 +15,7 @@ import { registerContact } from "./contact.js";
 import { registerEarlyAccess } from "./early-access.js";
 import { registerStatus } from "./status.js";
 import { registerAuth } from "./auth.js";
+import { registerSetup } from "./setup.js";
 import { registerCliLogin } from "./cli-login.js";
 import { registerOAuth } from "./oauth.js";
 import { registerActions } from "./actions.js";
@@ -75,6 +76,8 @@ registerSite(web);
 
 // Order matters: fixed paths (/settings/tokens, /notifications/:id, …) must be
 // registered before the /:owner/:repo patterns they would otherwise match.
+// First run: /setup creates the first administrator, before any page that expects one.
+registerSetup(web);
 registerAuth(web);
 registerCliLogin(web);
 registerOAuth(web);

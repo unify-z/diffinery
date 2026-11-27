@@ -54,6 +54,7 @@ import { OAUTH_API_PATH, oauthApi } from "./http/oauth.js";
 import { OAuth } from "./auth/oauth.js";
 import { Timing, timedEnv } from "./lib/timing.js";
 import { kumoAsset } from "./web/kumo.js";
+import { SITE_PAGES } from "./docs/content.generated.js";
 
 export const app = new Hono<{ Bindings: Env; Variables: AppVars }>();
 
@@ -119,6 +120,34 @@ app.use("*", async (c, next) => {
 });
 
 app.get("/healthz", (c) => c.json({ ok: true }));
+
+/**
+ * First run. Until an account exists, every browser page points at /setup (web/setup.tsx): a fresh
+ * instance has no email transport, no Cloudflare Access application and no passkey, so an invite
+ * link, an administrator's sign-in link and a passkey all need someone who is already in.
+ *
+ * The answer is remembered once it is true, so the check costs one D1 query for the life of the
+ * isolate. A second isolate that still sees no account redirects to /setup, which checks again and
+ * sends the visitor on to /login.
+ */
+let initialized = false;
+/**
+ * Paths that answer before setup: the wizard itself, the docs and the project's own pages (they
+ * need no account), assets, health, crawler files and API discovery. Everything else is the
+ * instance's own UI, which has nothing to show until it has an account.
+ */
+const BEFORE_SETUP = /^\/(?:setup$|healthz$|favicon|robots\.txt$|sitemap|llms|index\.md$|-\/|assets\/|docs(?:\/|$)|\.well-known\/)/;
+const SITE_PATHS = new Set(Object.keys(SITE_PAGES));
+app.use("*", async (c, next) => {
+  if (c.req.method !== "GET" || initialized || BEFORE_SETUP.test(c.req.path) || SITE_PATHS.has(c.req.path)) return next();
+  // Only pages: git, the API, MCP and the registry answer their clients with their own JSON.
+  if (!(c.req.header("accept") ?? "").includes("text/html")) return next();
+  if (await c.get("dir").hasAnyUser()) {
+    initialized = true;
+    return next();
+  }
+  return c.redirect("/setup", 302);
+});
 
 app.route("/", avatars);
 app.route("/", camo);

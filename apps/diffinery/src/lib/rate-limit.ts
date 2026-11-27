@@ -41,7 +41,7 @@ export const RATE_PERIOD_S = 60;
  * the GitHub App's signed webhook, which GitHub sends from a few addresses for every job of every installation.
  */
 const EXEMPT = /^\/(?:healthz$|api\/avatars\/|twirp\/|_runtime\/|_apis\/|runner\/|-\/model\/|-\/github\/webhook$)/;
-const AUTH = /^\/(?:auth\/passkey\/|invite\/|signin\/|login(?:$|\/)|signup(?:$|\/)|security\/report$|early-access(?:\/confirm|\/remove(?:\/confirm)?)?$|contact(?:\/confirm)?$|-\/cli\/device$|oauth\/register$)/;
+const AUTH = /^\/(?:auth\/passkey\/|invite\/|signin\/|login(?:$|\/)|setup(?:$|\/)|signup(?:$|\/)|security\/report$|early-access(?:\/confirm|\/remove(?:\/confirm)?)?$|contact(?:\/confirm)?$|-\/cli\/device$|oauth\/register$)/;
 const CREATE: Array<[method: string, path: RegExp]> = [
   ["POST", /^\/api\/v3\/(?:user|orgs\/[^/]+)\/repos$/],
   ["POST", /^\/api\/v3\/(?:user\/orgs|admin\/organizations)$/],
