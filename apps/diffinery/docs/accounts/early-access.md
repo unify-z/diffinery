@@ -7,7 +7,7 @@ While a Diffinery instance is invite-only (the default), people without an invit
 
 On diffinery.com, the project's own instance, this is how to try Diffinery before you deploy your own: [request early access there](https://diffinery.com/early-access).
 
-The form is only there while sign-up is closed. On an instance with [open sign-up](/docs/accounts/passkeys-and-sign-in#open-sign-up) (`SIGNUP=open`), `/early-access` leads to the sign-up page instead.
+The form is only there while registration is closed. On an instance where [sign-up is open](/docs/accounts/passkeys-and-sign-in#sign-up-methods), `/early-access` leads to the sign-up page instead.
 
 ## Request early access
 

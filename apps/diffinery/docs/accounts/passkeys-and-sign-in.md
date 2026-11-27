@@ -22,7 +22,7 @@ Details that matter in practice:
 | Time to complete the browser prompt | 2 minutes. The sign-in attempt itself expires after 5 minutes. |
 | Browser session length | 30 days, extended by another 30 days on each day you use it, up to 90 days after you signed in. |
 
-Diffinery is invite-only unless the instance turns on open sign-up. On an invite-only instance (the default) you can't create an account from the sign-in page: new people create their first passkey from an invite link (see [Join from an invite](#join-from-an-invite)). With open sign-up, the sign-in page also links to **Create an account** (see [Open sign-up](#open-sign-up)).
+Diffinery is invite-only unless a site administrator turns on registration in **Settings → Site administration → Registration** (see [Sign-up methods](#sign-up-methods)). On an invite-only instance (the default) you can't create an account from the sign-in page: new people create their first passkey from an invite link (see [Join from an invite](#join-from-an-invite)). With registration open, the sign-in page also links to **Create an account**.
 
 ## Sign in
 
@@ -71,9 +71,27 @@ Diffinery creates your account, saves the passkey, signs you in and shows "Welco
 
 If the email address already has an account, the invite page asks you to sign in with that account's passkey first; after that the same page shows an **Accept invite** button. See [Invitations](/docs/accounts/invitations) for how invites are created, how long they last and what each kind grants.
 
+## Sign-up methods
+
+On an instance whose site administrator turned registration on (**Settings → Site administration → Registration**, see [Site administration](/docs/admin/site-administration#registration)), anyone can create an account. The sign-in page then says **New here? Create an account** and lists the ways in that are on. Each one ends with a signed-in account:
+
+| Method | What you enter | Confirms your address | Account status |
+| --- | --- | --- | --- |
+| **Emailed code** | Your email address, the code from the email, a username and a passkey | Yes, by the code | As the site's setting |
+| **Passkey** | Your email address, a username and a passkey (no email is sent) | No | As the site's setting |
+| **Password** | Your email address, a username and a password (at least 10 characters) | No, unless the site requires an emailed code first | As the site's setting |
+
+The site's setting is **active** (you can use the site at once) or **pending** (you sign in, but you can't use the site until an administrator approves you). A pending account says **Waiting for an invite** on the home page and can request access.
+
+Where more than one way is on, the sign-in page links to each of them. Every way is refused on the server too, not just hidden: a way that's off answers `403` with the reason, and a closed registration answers `404` on `/signup`. An invitation always works, whatever is set.
+
+With **Passkey**, or **Password** without an emailed code, nobody checks that the address is yours. Such an account is yours to use, but its address grants nothing: it doesn't accept invitations sent to the address, it never makes you a site administrator, and if the address's real owner later proves it (with an invitation's email, an emailed sign-up code, or email recovery) the address moves to them. These two ways also say on the page when an address already has an account, since no email is sent to tell its owner instead.
+
+A password is a second way in, and it's never required: you can add a passkey from **Settings → Passkeys and sessions** at any time, and an account with a passkey keeps it.
+
 ## Open sign-up
 
-An instance whose operator set `SIGNUP=open` (see [Configuration](/docs/self-hosting/configuration#signup)) lets anyone create an account. The sign-in page then says **New here? Create an account**, which leads to `/signup`:
+When registration is open with the **Emailed code** way (or the operator has set `SIGNUP=open`, see [Configuration](/docs/self-hosting/configuration#signup)), the sign-in page's **Create an account** leads to `/signup`:
 
 1. Enter your email address and, if the page shows one, complete the Cloudflare Turnstile check. Click **Email me a code**.
 2. The page says "We sent a code to <address>". Find the email "Your sign-up code" and enter its 6 digits under **Code**, then click **Continue**. The code works once, for 10 minutes; a wrong code says how many tries are left (5 in all), and **send a new code** sends another one (up to 5 a day for an address).
@@ -83,7 +101,7 @@ Diffinery creates your account (active right away, no invite needed), saves the 
 
 If the address already has an account, the page reads exactly the same, so nobody can use it to find out who has an account. No code is sent: the account's owner gets an email "Someone tried to sign up with your email address" with a link to sign in instead.
 
-On an invite-only instance `/signup` doesn't exist (`404`). Limits on codes are listed in [Limits](/docs/reference/limits#sign-in-and-sessions).
+With registration closed, `/signup` leads to the [early access](/docs/accounts/early-access) request form, or answers `404` when that isn't set up either. Limits on codes are listed in [Limits](/docs/reference/limits#sign-in-and-sessions).
 
 ## Manage your passkeys
 

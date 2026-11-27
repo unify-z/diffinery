@@ -12,6 +12,7 @@ Site administrators have admin on every repository, can act as an owner of every
 | Page | Path | What it is for |
 | --- | --- | --- |
 | **People and invitations** | `/settings/admin` | Access requests, instance invitations, the list of users, account status and sign-in links |
+| **Registration** | `/settings/admin/registration` | Whether people can create an account themselves, which ways in are on, the status of new accounts and the bot check |
 | **Early access** | `/settings/admin/early-access` | Requests from people without an invitation, to invite, decline or delete |
 | **Contact messages** | `/settings/admin/contact` | Messages from the contact form, to read, answer, mark handled or spam, and delete |
 | **Reports** | `/settings/admin/reports` | What people reported as abusive, to look at and resolve |
@@ -131,6 +132,22 @@ diffinery api DELETE /users/diffy/suspended
 ```
 
 Both answer `204`. Anyone else gets `403 site administrators only`.
+
+## Registration
+
+**Settings → Site administration → Registration** (`/settings/admin/registration`) decides whether people can create an account without an invitation. Invitations and the first-run page at `/setup` always work, whatever is set here. A fresh instance is invite-only: nothing is open until you save the page with **Let people create accounts themselves** ticked.
+
+The top of the page says in one sentence what applies now, for example "Open: password, passkey. A new account is active as soon as it exists."
+
+- **Let people create accounts themselves**: the switch. Off, the sign-in page says the instance is invite-only and every sign-up page, and every sign-up form, refuses. It takes effect on the next request; nothing is cached.
+- **Ways in**: each is on by itself, and you can turn on more than one. **Emailed code** sends a 6-digit code to the address, then the person picks a username and creates a passkey. **Passkey** asks for an address and a username, then creates the passkey, with no email. **Password** takes an address, a username and a password, and creates the account at once. A way that needs email (the emailed code, or a password with **Require email verification**) can't be turned on on an instance with no email set up; the page says so.
+- **Require email verification for password sign-ups**: a password sign-up emails a code first, and the account is created when the code is entered. Off, a password account is created without confirming the address.
+- **New account status**: **Active** lets the new person use the site at once. **Pending** lets them sign in, but they can't use the site until you approve them under **People and invitations**.
+- **Bot check (Turnstile)**: **As the instance is set up** uses the Turnstile keys the deploy set (and skips the check on the local machine). **Required** refuses sign-up unless both keys are set, even locally. The page shows which applies.
+
+If the deployment sets `SIGNUP=open`, the page says so: registration stays on and the emailed-code way stays on whatever you save. `SIGNUP` can only open registration, so to close the instance, remove the variable from the deployment and turn the switch off here. See [SIGNUP](/docs/self-hosting/configuration#signup).
+
+Every save is in the [audit log](/docs/security/audit-log) as `registration.policy.update`, with what it was and what it is. Every new account made through a way in is recorded there too (`signup` or `account.signup`).
 
 ## Early access
 

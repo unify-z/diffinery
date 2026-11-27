@@ -17,7 +17,7 @@ Units: 1 KiB is 1,024 bytes, 1 MiB is 1,048,576 bytes, and 1 GB in the cache and
 | Passkey sign-in attempt | 5 minutes | A sign-in or registration that started more than 5 minutes ago can't be completed; start again. |
 | Sign-in link lifetime | 24 hours, single use | Links a site administrator sends with **Sign-in link** in **Settings → People and invitations**. |
 | Invitation lifetime | 14 days | Invitations to the site, an organization or a repository. |
-| Sign-up code | 10 minutes, single use, 5 tries | With open sign-up (`SIGNUP=open`): the 6-digit code emailed from `/signup`. After 5 codes entered for it, right or wrong, it stops working (`That code has expired or was entered wrong too many times`). Sending a new code ends the old one. |
+| Sign-up code | 10 minutes, single use, 5 tries | With self-service sign-up on (the emailed-code way, or a password sign-up that needs its address confirmed): the 6-digit code emailed from `/signup`. After 5 codes entered for it, right or wrong, it stops working (`That code has expired or was entered wrong too many times`). Sending a new code ends the old one. |
 | Sign-up codes per address | 5 in 24 hours | Codes asked for one email address, counting the note sent instead when the address already has an account. The next one gets `429 We have sent several codes to <address> today`. |
 | Sign-up codes per IP address | 20 in 24 hours | Codes asked for from one IP address. The next one gets `429 Too many sign-ups from your network today`. |
 | Sign-up passkey step | 30 minutes, single use | After the code is accepted, the page for picking a username and creating a passkey. Start again at `/signup` once it runs out. |
