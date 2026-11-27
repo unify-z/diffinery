@@ -6,7 +6,10 @@ the pull request.
 
 ## Sign-in: passkeys first
 
-- People sign in with passkeys (WebAuthn). Don't add passwords.
+- People sign in with passkeys (WebAuthn). A password is the *second* way in, and it
+  exists for one case: an instance with no email transport and no Cloudflare Access,
+  where `/setup` has to create the first administrator without an authenticator. It
+  never replaces a passkey — an account with both offers both at `/login`.
 - New people create their passkey from their invite link.
 - Recovery goes through a one-time sign-in link from an admin, or email
   verification through Cloudflare Access at `/auth/access`. Access guards only

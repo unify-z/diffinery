@@ -15,6 +15,7 @@ import { ICONS } from "./assets.js";
 import { KCheckbox, KRadio, KSelect } from "./kumo.js";
 import { csrfToken } from "./csrf.js";
 import { Auth } from "../auth/sessions.js";
+import { hashPassword, passwordProblem, verifyPassword } from "../auth/password.js";
 import { repoCreated } from "../mail/notify.js";
 import { browserAccount, deviceLabel, invitePasskeyPage, localPath } from "./auth.js";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
@@ -1010,7 +1011,43 @@ function registerSettings(web: WebApp): void {
       "Passkeys and sessions",
       <>
         <h1>Passkeys and sessions</h1>
-        <p class="muted">You sign in to Diffinery with passkeys instead of a password. A passkey lives on your device or in your password manager and is unlocked with your fingerprint, face or screen lock.</p>
+        <p class="muted">A passkey lives on your device or in your password manager and is unlocked with your fingerprint, face or screen lock. A password also works: it is what the first administrator of an instance creates at <code>/setup</code>, and what you fall back on when no passkey is at hand.</p>
+        <div class="box">
+          <div class="head">
+            <h2>Password</h2>
+            {me.password_hash ? <span class="badge">set</span> : <span class="badge">not set</span>}
+          </div>
+          <div class="body">
+            <Form action="/settings/security/password" t={t}>
+              {me.password_hash ? (
+                <div class="field">
+                  <label for="current">Current password</label>
+                  <input id="current" name="current" type="password" autocomplete="current-password" required maxlength={200} />
+                </div>
+              ) : null}
+              <div class="field">
+                <label for="newpass">{me.password_hash ? "New password" : "Set a password"}</label>
+                <input id="newpass" name="password" type="password" autocomplete="new-password" required minlength={10} maxlength={200} />
+                <div class="hint">At least 10 characters. Signing in with it works from any browser, with no passkey.</div>
+              </div>
+              <div class="field">
+                <label for="confirmpass">Password again</label>
+                <input id="confirmpass" name="confirm" type="password" autocomplete="new-password" required minlength={10} maxlength={200} />
+              </div>
+              <button class="btn">{me.password_hash ? "Change password" : "Set password"}</button>
+              {me.password_hash ? (
+                <span class="muted small" style="margin-left:8px">
+                  Changing it signs out your other browsers. To remove the password, use <b>Remove password</b> below once a passkey is added.
+                </span>
+              ) : null}
+            </Form>
+            {me.password_hash && keys.length > 0 ? (
+              <Form action="/settings/security/password/remove" t={t} class="mt" confirm="Remove the password? You will need a passkey to sign in.">
+                <button class="btn sm danger">Remove password</button>
+              </Form>
+            ) : null}
+          </div>
+        </div>
         <div class="box">
           <div class="head">
             <h2>Passkeys</h2>
@@ -1068,7 +1105,7 @@ function registerSettings(web: WebApp): void {
                   <div class="grow">
                     <b>{deviceLabel(s.user_agent ?? undefined)}</b> {s.id === current ? <span class="badge green">this browser</span> : null}
                     <div class="meta">
-                      Signed in <Time at={s.created_at} /> with {s.method === "access" ? "email recovery" : s.method === "link" ? "a sign-in link" : "a passkey"} · active <Time at={s.last_seen_at} />
+                      Signed in <Time at={s.created_at} /> with {s.method === "access" ? "email recovery" : s.method === "link" ? "a sign-in link" : s.method === "password" ? "a password" : "a passkey"} · active <Time at={s.last_seen_at} />
                     </div>
                   </div>
                   {s.id !== current ? (
@@ -1097,6 +1134,52 @@ function registerSettings(web: WebApp): void {
           Lost every passkey? {recovery ? <>Use <a href="/auth/access">email recovery</a>, then add a new passkey here.</> : "Ask a site administrator for a one-time sign-in link."} Git, the CLI and agents use <a href="/settings/tokens">access tokens</a> instead of passkeys.
         </p>
       </>,
+    );
+  });
+
+  post(web, "/settings/security/password", async (c, f) => {
+    const me = browserAccount(c);
+    const dir = c.get("dir");
+    const current = f.s("current");
+    const password = f.s("password");
+    const confirm = f.s("confirm");
+    return act(
+      c,
+      "/settings/security",
+      async () => {
+        const stored = me.password_hash ?? null;
+        // With a password, the password itself proves it is you; without one, a recent sign-in does.
+        if (stored) {
+          if (!(await verifyPassword(current, stored))) throw new HttpError(422, "That is not your current password.");
+        } else {
+          requireRecentSignIn(c, "/settings/security");
+        }
+        if (password !== confirm) throw new HttpError(422, "The two passwords do not match.");
+        const problem = passwordProblem(password);
+        if (problem) throw new HttpError(422, problem);
+        await dir.setPassword(me.id, await hashPassword(password));
+        const p = c.get("principal");
+        await new Auth(c.env).endOtherSessions(me.id, p.type === "account" ? (p.sessionId ?? null) : null);
+        c.executionCtx.waitUntil(dir.audit({ actorId: me.id, actorLogin: me.login, action: stored ? "password.change" : "password.set" }));
+      },
+      "Password saved. Your other browsers were signed out.",
+    );
+  });
+
+  post(web, "/settings/security/password/remove", async (c) => {
+    const me = browserAccount(c);
+    const dir = c.get("dir");
+    return act(
+      c,
+      "/settings/security",
+      async () => {
+        if (!me.password_hash) throw new HttpError(422, "There is no password to remove.");
+        if (!(await new Auth(c.env).passkeys(me.id)).length) throw new HttpError(422, "Add a passkey first, or you would be locked out.");
+        requireRecentSignIn(c, "/settings/security");
+        await dir.setPassword(me.id, null);
+        c.executionCtx.waitUntil(dir.audit({ actorId: me.id, actorLogin: me.login, action: "password.remove" }));
+      },
+      "Password removed. Sign in with a passkey from now on.",
     );
   });
 

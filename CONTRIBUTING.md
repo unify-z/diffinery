@@ -85,7 +85,8 @@ maintainer may have to approve the workflows of your first pull request before t
 - **Security first.** Agents never get a bypass: guardrails are enforced on the server for
   git, REST, MCP and the web UI alike. Never log secrets or tokens. Changes to sign-in,
   tokens, permissions, secrets or the runner sandbox get extra review.
-- **UI and product conventions** (passkeys first, Kumo components, no native `<select>` or
+- **UI and product conventions** (passkeys first, with a password as the fallback for an
+  instance with no email and no Cloudflare Access; Kumo components, no native `<select>` or
   checkboxes) are in [docs/PREFERENCES.md](docs/PREFERENCES.md).
 
 ## Pull requests

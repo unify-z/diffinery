@@ -68,7 +68,7 @@ export class Auth {
 
   // ---------------------------------------------------------------- sessions
 
-  async createSession(accountId: string, method: "passkey" | "access" | "link", passkeyId: string | null, userAgent: string | null): Promise<string> {
+  async createSession(accountId: string, method: "passkey" | "access" | "link" | "password", passkeyId: string | null, userAgent: string | null): Promise<string> {
     const token = randomToken(32);
     const at = now();
     await this.db

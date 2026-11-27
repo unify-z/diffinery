@@ -66,9 +66,15 @@ not depend on the speed of the machine they run on.
 - **Security:** guardrails for agents are enforced on the server for git, REST, MCP and the
   web UI alike. Never add a bypass, never log secrets or tokens, and never weaken push
   protection, branch protection or the runner sandbox to make something pass.
-- **UI:** passkeys first, no passwords; Kumo components through `KSelect`, `KCheckbox` and
-  `KRadio`, never a native `<select>`, checkbox or radio. See
-  [docs/PREFERENCES.md](docs/PREFERENCES.md).
+- **UI:** passkeys first. A password is the second way in and only for what passkeys cannot
+  cover: an instance with no email transport and no Cloudflare Access, where `/setup`
+  (`src/web/setup.tsx`) has to create the first administrator without an authenticator.
+  Keep a passkey working wherever a password works, and never make a password required. Kumo
+  components through `KSelect`, `KCheckbox` and `KRadio`, never a native `<select>`, checkbox
+  or radio. See [docs/PREFERENCES.md](docs/PREFERENCES.md).
+- **The first run must work with no outside service.** A fresh instance has no email, no
+  Access application and no passkey, so `/setup` is the only way in. Never remove it, never
+  make it depend on a Worker variable, and keep `test/unit/password.test.ts` green.
 - **Code style:** strict TypeScript, few dependencies, comments that say why, matching the
   density and style of the code around your change.
 - **Pull requests:** one change each, a title that says what it does, an `intent` that says

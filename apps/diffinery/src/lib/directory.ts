@@ -28,6 +28,10 @@ export interface Account {
   auto_merge?: string | null;
   /** Organizations: the role every member gets on its repositories ("none", "read", "write" or "admin"). */
   base_role: string | null;
+  /** Password sign-in (src/auth/password.ts); null or absent when the account signs in with a passkey only. */
+  password_hash?: string | null;
+  /** When the password last changed; a change signs out the account's other browsers. */
+  password_updated_at?: string | null;
   /** Set while a site administrator suspends the person (lib/moderation.ts); status is then `disabled`. */
   suspended_at?: string | null;
   suspended_by?: string | null;
@@ -107,6 +111,40 @@ export class Directory {
 
   async accountByEmail(email: string): Promise<Account | null> {
     return this.db.prepare("SELECT * FROM accounts WHERE email = ? AND kind = 'user'").bind(email).first<Account>();
+  }
+
+  /** A sign-in identifier: a login first (what the profile shows), else an email address. */
+  async accountByLoginOrEmail(identifier: string): Promise<Account | null> {
+    const value = identifier.trim();
+    if (!value) return null;
+    return (await this.accountByLogin(value)) ?? (value.includes("@") ? await this.accountByEmail(value.toLowerCase()) : null);
+  }
+
+  /** Whether this instance has any user yet. False only until /setup creates the first administrator. */
+  async hasAnyUser(): Promise<boolean> {
+    return !!(await this.db.prepare("SELECT 1 FROM accounts WHERE kind = 'user' LIMIT 1").first());
+  }
+
+  /** Set (or, with null, remove) an account's password. Bumps password_updated_at, which ends its other sessions. */
+  async setPassword(id: string, hash: string | null): Promise<void> {
+    await this.db.prepare("UPDATE accounts SET password_hash = ?, password_updated_at = ? WHERE id = ?").bind(hash, hash ? now() : null, id).run();
+  }
+
+  /**
+   * The first administrator, from /setup. Takes no invite, no bootstrap list and no email
+   * verification: on an instance with no user yet, whoever reaches the page first is the operator.
+   * The unique index on login and the hasAnyUser check keep a second one out.
+   */
+  async createFirstAdmin(input: { login: string; email: string; name?: string | null; passwordHash: string }): Promise<Account> {
+    if (await this.hasAnyUser()) throw new HttpError(409, "this instance already has an account");
+    const id = newId();
+    const at = now();
+    await this.db
+      .prepare("INSERT INTO accounts (id, login, kind, name, email, status, site_admin, password_hash, password_updated_at, created_at) VALUES (?, ?, 'user', ?, ?, 'active', 1, ?, ?, ?)")
+      .bind(id, input.login, input.name ?? null, input.email, input.passwordHash, at, at)
+      .run();
+    await this.audit({ actorId: id, actorLogin: input.login, action: "site_admin.grant", target: input.login, detail: { via: "setup" } });
+    return (await this.account(id))!;
   }
 
   /**

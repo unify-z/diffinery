@@ -13,6 +13,7 @@ import { raw } from "hono/html";
 import type { FC, PropsWithChildren } from "hono/jsx";
 import { RECENT_SIGNIN_MS, accessToken, requireRecentSignIn, type AppContext } from "../auth/principal.js";
 import { Auth, CHALLENGE_COOKIE, SESSION_COOKIE, SESSION_DAYS, type PasskeyRow, type Subject } from "../auth/sessions.js";
+import { dummyHash, hashPassword, needsRehash, verifyPassword } from "../auth/password.js";
 import type { Account } from "../lib/directory.js";
 import { verifyAccessJwt } from "../lib/jwt.js";
 import { HttpError, b64url, fromB64url, isValidLogin, newId, now, sha256 } from "../lib/util.js";
@@ -70,7 +71,7 @@ export function signinContext(c: AppContext): { device: string; ip?: string; loc
 }
 
 /** Sign this browser in; returns the new session's id. */
-async function startSession(c: AppContext, auth: Auth, accountId: string, method: "passkey" | "access" | "link", passkeyId: string | null): Promise<string> {
+async function startSession(c: AppContext, auth: Auth, accountId: string, method: "passkey" | "access" | "link" | "password", passkeyId: string | null): Promise<string> {
   const old = getCookie(c, SESSION_COOKIE);
   if (old) await auth.endSession(old);
   const token = await auth.createSession(accountId, method, passkeyId, c.req.header("user-agent") ?? null);
@@ -386,6 +387,19 @@ export function registerAuth(web: WebApp): void {
           <PasskeyMessage />
           <button class="btn primary block">Sign in with a passkey</button>
         </form>
+        <div class="authsplit">or</div>
+        <Form action="/login" t={csrfToken(c)}>
+          <input type="hidden" name="next" value={next} />
+          <div class="field">
+            <label for="identifier">Username or email</label>
+            <input id="identifier" name="identifier" type="text" autocomplete="username" required maxlength={254} />
+          </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required maxlength={200} />
+          </div>
+          <button class="btn block">Sign in with a password</button>
+        </Form>
         <div class="authfoot muted small">
           {signupOpen(c.env) ? (
             <p>
@@ -408,8 +422,54 @@ export function registerAuth(web: WebApp): void {
     );
   });
 
-  // Admin-issued sign-in link: add a passkey to an existing account. Links carry the token in the
-  // fragment (/signin#<token>), which browsers never send, so request logs never hold a usable copy:
+  // Password sign-in (src/auth/password.ts). An addition to passkeys, for instances with no email
+  // transport and no Cloudflare Access. The work is the same whether or not the account exists, so a
+  // wrong login and a wrong password answer alike and take alike.
+  post(web, "/login", async (c, f) => {
+    const identifier = f.s("identifier").trim();
+    const password = f.s("password");
+    const next = safeNext(f.s("next"));
+    const dir = c.get("dir");
+    const account = await dir.accountByLoginOrEmail(identifier);
+    const stored = account?.kind === "user" ? account.password_hash : null;
+    const ok = await verifyPassword(password, stored ?? (await dummyHash()));
+    const usable = ok && account !== null && account.kind === "user" && account.status !== "disabled";
+    if (!usable) {
+      c.status(401);
+      return render(
+        c,
+        { title: "Sign in", status: 401 },
+        <AuthCard title="Sign in to Diffinery">
+          <div class="flash error" role="alert">
+            That username or password is not right.
+          </div>
+          <Form action="/login" t={csrfToken(c)}>
+            <input type="hidden" name="next" value={next} />
+            <div class="field">
+              <label for="identifier">Username or email</label>
+              <input id="identifier" name="identifier" type="text" autocomplete="username" required maxlength={254} value={identifier} autofocus />
+            </div>
+            <div class="field">
+              <label for="password">Password</label>
+              <input id="password" name="password" type="password" autocomplete="current-password" required maxlength={200} />
+            </div>
+            <button class="btn primary block">Sign in with a password</button>
+          </Form>
+          <div class="authfoot muted small">
+            <p>
+              <a href={`/login?next=${encodeURIComponent(next)}`}>Use a passkey instead</a>
+            </p>
+          </div>
+        </AuthCard>,
+      );
+    }
+    // Raise the iteration count in place when it went up since this password was stored.
+    if (stored && needsRehash(stored)) await dir.setPassword(account!.id, await hashPassword(password));
+    await startSession(c, new Auth(c.env), account!.id, "password", null);
+    const ctx = signinContext(c);
+    c.executionCtx.waitUntil(dir.audit({ actorId: account!.id, actorLogin: account!.login, action: "session.password", detail: { device: ctx.device } }));
+    return c.redirect(next, 303);
+  });
   // SIGNIN_LINK_SCRIPT reads it, takes it out of the address bar, and asks which account it is for.
   web.get("/signin", (c) =>
     render(

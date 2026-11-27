@@ -35,6 +35,30 @@ You land on the page you were trying to open (or your dashboard). To sign out, c
 
 The sign-in page also says how to recover a lost passkey on this instance: either a **Recover your account by email** link (when email recovery is set up) or "Ask an administrator for a sign-in link".
 
+## Sign in with a password
+
+An account can have a password as well as passkeys, and `/login` offers both. Diffinery
+added passwords for one case: an instance with no email sending and no Cloudflare Access,
+where an invite link and an administrator's sign-in link both need someone who is already
+in, and `/setup` therefore has to create the first administrator some other way.
+
+- **The first administrator** creates its account, with a password, at `/setup`. That page
+  appears only while the instance has no account at all; afterwards it redirects to
+  `/login`.
+- **Adding one to an existing account:** **Settings → Security → Password**. You need a
+  recent sign-in to set the first password; changing it needs the current one.
+- **Removing it:** the same box has **Remove password**, which asks for a passkey first, so
+  you cannot lock yourself out.
+- **Where it works:** the web UI only, at `/login`. Git, the API, MCP and the CLI use
+  [personal access tokens](/docs/accounts/tokens); a password never works as one.
+- **Limits:** at least 10 characters, and no limit on how often you try beyond the sign-in
+  rate limit (20 attempts a minute per address). Changing or removing a password signs out
+  your other browsers.
+
+Passwords are stored as a PBKDF2-HMAC-SHA256 hash with a random salt per password, so the
+stored value cannot be turned back into the password. If an administrator can read the
+database, they still cannot sign in as you with it.
+
 ## Join from an invite
 
 When someone invites you, Diffinery emails you a link like `https://diffinery.com/invite/<token>`. If you don't have an account yet, opening it shows a **Join Diffinery** page:
