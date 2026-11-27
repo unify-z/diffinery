@@ -96,10 +96,7 @@ const codeHashWith = async (secret: string, id: string, code: string): Promise<s
 
 const minutes = (n: number): string => new Date(Date.now() + n * 60_000).toISOString();
 
-/** The registration typed before a code was sent, when the address had to be confirmed first. */
-export type PendingSignup = { login: string; name: string | null; passwordHash: string; method: SignupMethod };
-
-export type CodeCheck = { ok: true; pending: PendingSignup | null } | { ok: false; left: number };
+export type CodeCheck = { ok: true } | { ok: false; left: number };
 
 /** Sign-up codes and tickets in D1. */
 export class Signups {
@@ -122,12 +119,8 @@ export class Signups {
    * A new code for `email`, requested from `ip`, after the daily limits; older codes for the
    * address stop working. An address that already has an account gets a code too, which is
    * never sent: wrong guesses then answer exactly as they would for a new address.
-   *
-   * `pending` holds the registration typed before the code was sent, for a method that needs the
-   * address confirmed first: the password is stored hashed, and the account is created when the
-   * code is entered. The emailed-code flow stores nothing and asks for a username afterwards.
    */
-  async issue(email: string, ip: string, pending?: PendingSignup): Promise<{ code: string; expiresAt: string }> {
+  async issue(email: string, ip: string): Promise<{ code: string; expiresAt: string }> {
     const since = new Date(Date.now() - 86400_000).toISOString();
     const sent = await this.db
       .prepare("SELECT (SELECT count(*) FROM signup_codes WHERE email = ? AND created_at > ?) AS email, (SELECT count(*) FROM signup_codes WHERE ip = ? AND created_at > ?) AS ip")
@@ -140,10 +133,8 @@ export class Signups {
     const at = now();
     const expiresAt = minutes(CODE_MINUTES);
     await this.db.batch([
-      this.db.prepare("UPDATE signup_codes SET expires_at = ?, password_hash = NULL, login = NULL, name = NULL WHERE email = ? AND used_at IS NULL AND expires_at > ?").bind(at, email, at),
-      this.db
-        .prepare("INSERT INTO signup_codes (id, email, ip, code_hash, created_at, expires_at, login, name, password_hash, method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(id, email, ip, await codeHash(this.env, id, code), at, expiresAt, pending?.login ?? null, pending?.name ?? null, pending?.passwordHash ?? null, pending?.method ?? null),
+      this.db.prepare("UPDATE signup_codes SET expires_at = ? WHERE email = ? AND used_at IS NULL AND expires_at > ?").bind(at, email, at),
+      this.db.prepare("INSERT INTO signup_codes (id, email, ip, code_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, email, ip, await codeHash(this.env, id, code), at, expiresAt),
       // Rows older than a day no longer count towards any limit.
       this.db.prepare("DELETE FROM signup_codes WHERE created_at < ?").bind(since),
     ]);
@@ -159,19 +150,14 @@ export class Signups {
     const t = now();
     const row = await this.db
       .prepare(
-        "UPDATE signup_codes SET attempts = attempts + 1 WHERE id = (SELECT id FROM signup_codes WHERE email = ? AND used_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1) AND attempts < ? RETURNING id, code_hash, attempts, login, name, password_hash, method",
+        "UPDATE signup_codes SET attempts = attempts + 1 WHERE id = (SELECT id FROM signup_codes WHERE email = ? AND used_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1) AND attempts < ? RETURNING id, code_hash, attempts",
       )
       .bind(email, t, MAX_CODE_ATTEMPTS)
-      .first<{ id: string; code_hash: string; attempts: number; login: string | null; name: string | null; password_hash: string | null; method: string | null }>();
+      .first<{ id: string; code_hash: string; attempts: number }>();
     if (!row) return { ok: false, left: 0 };
     if (await codeMatches(this.env, row.id, code, row.code_hash)) {
-      // A used code keeps no password hash or names: they move to the account or nowhere.
-      const r = await this.db.prepare("UPDATE signup_codes SET used_at = ?, password_hash = NULL, login = NULL, name = NULL WHERE id = ? AND used_at IS NULL").bind(t, row.id).run();
-      if ((r.meta.changes ?? 0) > 0) {
-        // The registration typed before the code, when there was one: only a password sign-up stores it.
-        const pending: PendingSignup | null = row.login && row.password_hash && row.method === "password" ? { login: row.login, name: row.name, passwordHash: row.password_hash, method: "password" } : null;
-        return { ok: true, pending };
-      }
+      const r = await this.db.prepare("UPDATE signup_codes SET used_at = ? WHERE id = ? AND used_at IS NULL").bind(t, row.id).run();
+      if ((r.meta.changes ?? 0) > 0) return { ok: true };
     }
     return { ok: false, left: Math.max(0, MAX_CODE_ATTEMPTS - row.attempts) };
   }

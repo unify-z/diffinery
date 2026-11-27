@@ -10,6 +10,7 @@
 import { raw } from "hono/html";
 import type { AppContext } from "../auth/principal.js";
 import type { WebApp } from "./ui.js";
+import { isProduction } from "../lib/instance.js";
 import { ICON_FILES } from "./icons.generated.js";
 import { docsSitemapEntries } from "../docs/web.js";
 import { CONTACT, siteSitemapEntries } from "./site.js";
@@ -98,13 +99,15 @@ export function registerSeo(web: WebApp): void {
   web.get("/sitemap.xml", async (c) => {
     const origin = c.env.PUBLIC_URL.replace(/\/$/, "");
     const repos = await c.get("dir").publicRepos(5000);
+    const production = await isProduction(c.env);
     const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const url = (loc: string, lastmod?: string | null) => `<url><loc>${esc(loc)}</loc>${lastmod ? `<lastmod>${esc(lastmod.slice(0, 10))}</lastmod>` : ""}</url>`;
     const body = [
       '<?xml version="1.0" encoding="UTF-8"?>',
       '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
-      // The home page, then the product, comparison and company pages (web/site.tsx).
-      ...siteSitemapEntries().map((e) => url(`${origin}${e.path}`, e.updated)),
+      // The home page, then the product, comparison and company pages (web/site.tsx): demo mode only,
+      // since a production instance doesn't serve them.
+      ...(production ? [] : siteSitemapEntries().map((e) => url(`${origin}${e.path}`, e.updated))),
       // The contact form (web/contact.tsx), for people and AI assistants looking for how to reach the team.
       url(`${origin}${CONTACT.path}`, CONTACT.updated),
       ...docsSitemapEntries().map((e) => url(`${origin}${e.path}`, e.updated)),

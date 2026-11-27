@@ -16,6 +16,7 @@ import { SITE_NAV, SITE_PAGES } from "../docs/content.generated.js";
 import { imageProxy } from "../lib/camo.js";
 import { ICONS } from "./assets.js";
 import { GITHUB_REPO, githubStars } from "./github-stars.js";
+import { isProduction } from "../lib/instance.js";
 import { fenceHighlighter } from "./highlight.js";
 import { escapeHtml, fenceLangs, renderMarkdown } from "./markdown.js";
 import { SITE } from "./seo.js";
@@ -767,12 +768,21 @@ export function siteFullMarkdown(o: string): string[] {
   return [homeMarkdown(o), ...sitePages().map((p) => sitePageMarkdown(p, o))];
 }
 
+/**
+ * The project's own pages (/features, /compare/*, /about, ...). They are what diffinery.com serves
+ * and what demo mode links to. A production instance (lib/instance.ts) is its own Git host and
+ * doesn't publish the project's marketing, so they answer 404 there; the docs and /llms.txt stay.
+ */
+function projectPage(c: AppContext): Promise<boolean> | boolean {
+  return isProduction(c.env);
+}
+
 export function registerSite(web: WebApp): void {
-  web.get("/index.md", (c) => markdownResponse(c, homeMarkdown(origin(c))));
+  web.get("/index.md", async (c) => ((await projectPage(c)) ? c.notFound() : markdownResponse(c, homeMarkdown(origin(c)))));
   for (const p of sitePages()) {
-    web.get(`${p.path}.md`, (c) => markdownResponse(c, sitePageMarkdown(p, origin(c))));
-    web.get(`${p.path}/`, (c) => c.redirect(p.path, 301));
-    web.get(p.path, (c) => (wantsMarkdown(c) ? markdownResponse(c, sitePageMarkdown(p, origin(c))) : sitePageResponse(c, p)));
+    web.get(`${p.path}.md`, async (c) => ((await projectPage(c)) ? c.notFound() : markdownResponse(c, sitePageMarkdown(p, origin(c)))));
+    web.get(`${p.path}/`, async (c) => ((await projectPage(c)) ? c.notFound() : c.redirect(p.path, 301)));
+    web.get(p.path, async (c) => ((await projectPage(c)) ? c.notFound() : wantsMarkdown(c) ? markdownResponse(c, sitePageMarkdown(p, origin(c))) : sitePageResponse(c, p)));
   }
 }
 

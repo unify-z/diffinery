@@ -7,13 +7,16 @@
  * pending accounts, the audit trail, Turnstile, the SIGNUP=open override, and the rule that /setup
  * and invitations never depend on any of it.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { app } from "../../src/app.js";
 import { web } from "../../src/web/routes.js";
 import type { Env } from "../../src/env.js";
 import type { Account } from "../../src/lib/directory.js";
 import { Directory } from "../../src/lib/directory.js";
-import { DEFAULT_POLICY, methodProblem, parsePolicy, policyFromForm, readRegistrationPolicy, registrationPolicy, registrationProblem, registrationSummary, saveRegistrationPolicy, turnstileProblem, type RegistrationPolicy } from "../../src/auth/registration.js";
+import { DEFAULT_POLICY, emailTransport, methodProblem, parsePolicy, policyFromForm, readRegistrationPolicy, registrationPolicy, registrationProblem, registrationSummary, saveRegistrationPolicy, signupProblem, type RegistrationPolicy } from "../../src/auth/registration.js";
+import { capConfiguration, normalCapEndpoint, normalCapSiteKey, verifyCaptcha } from "../../src/auth/captcha.js";
+import { encryptSecret } from "../../src/lib/crypto.js";
+import { readInstanceSettings } from "../../src/lib/instance.js";
 import { Signups, normalEmail } from "../../src/auth/signup.js";
 import { HttpError } from "../../src/lib/util.js";
 import { testD1 } from "./stubs/d1.js";
@@ -34,14 +37,26 @@ function setup(over: Record<string, unknown> = {}) {
   DB.sqlite.prepare("INSERT INTO accounts (id, login, kind, email, status, site_admin, created_at) VALUES (?, ?, 'user', ?, 'active', 1, ?)").run("u-root", "root", "root@example.com", at);
   const audits: Array<{ action: string; detail?: { before?: unknown; after?: unknown } }> = [];
   const dir = { audit: async (e: (typeof audits)[number]) => void audits.push(e) } as unknown as Directory;
-  // The e-mail transport is an EMAIL binding unless a test says otherwise.
-  const env = { DB, PUBLIC_URL: PUB, MASTER_KEY, EMAIL: {} as SendEmail, ...over } as unknown as Env;
+  // An email transport and Turnstile keys unless a test says otherwise: the deployed norm, so a
+  // save that opens registration has a way in and a bot check to work with.
+  const env = { DB, PUBLIC_URL: PUB, MASTER_KEY, EMAIL: {} as SendEmail, TURNSTILE_SITE_KEY: "0x4AAAAAAAsite", TURNSTILE_SECRET: "turnstile-secret", ...over } as unknown as Env;
   const admin = DB.sqlite.prepare("SELECT * FROM accounts WHERE id = 'u-root'").get() as unknown as Account;
-  return { env, DB, audits, dir, admin };
+  /** Put the instance in a mode without going through the page. */
+  const instance = (mode: "demo" | "production", requireEmailForSignup = true) => DB.sqlite.prepare("UPDATE instance_settings SET mode = ?, require_email_for_signup = ?").run(mode, requireEmailForSignup ? 1 : 0);
+  return { env, DB, audits, dir, admin, instance };
 }
 
 const save = (s: ReturnType<typeof setup>, p: Partial<RegistrationPolicy>) =>
   saveRegistrationPolicy(s.env, s.dir, { ...DEFAULT_POLICY, ...p }, s.admin);
+
+/**
+ * A policy written straight into the row, past the checks: what an instance looks like when the
+ * keys or the email transport it relied on disappear after the page was saved.
+ */
+const stored = (s: ReturnType<typeof setup>, p: Partial<RegistrationPolicy>) =>
+  s.DB.sqlite
+    .prepare("INSERT INTO registration_policy (id, enabled, methods, new_account_status, provider) VALUES (1, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET enabled = excluded.enabled, methods = excluded.methods, new_account_status = excluded.new_account_status, provider = excluded.provider")
+    .run(p.enabled === false ? 0 : 1, JSON.stringify(p.methods ?? ["passkey"]), p.newAccountStatus ?? "active", p.provider ?? "auto");
 
 describe("the stored policy", () => {
   it("an empty table reads as the defaults: closed, invite-only", async () => {
@@ -58,17 +73,17 @@ describe("the stored policy", () => {
 
   it("the migration's row is the defaults too", async () => {
     const { env } = setup();
-    expect(await readRegistrationPolicy(env)).toMatchObject({ enabled: false, methods: [], newAccountStatus: "active", turnstile: "inherit", requireEmailVerification: false });
+    expect(await readRegistrationPolicy(env)).toMatchObject({ enabled: false, methods: [], newAccountStatus: "active", provider: "auto" });
   });
 
   it("a hand-edited row never grants more than it says", () => {
-    expect(parsePolicy({ enabled: 1, methods: '["password","root","email_code"]', require_email_verification: 0, new_account_status: "root", turnstile: "off", updated_at: null, updated_by: null })).toMatchObject({
+    expect(parsePolicy({ enabled: 1, methods: '["password","root","email_code"]', new_account_status: "root", provider: "off", updated_at: null, updated_by: null })).toMatchObject({
       enabled: true,
       methods: ["email_code", "password"],
       newAccountStatus: "active",
-      turnstile: "inherit",
+      provider: "auto",
     });
-    expect(parsePolicy({ enabled: 1, methods: "not json", require_email_verification: 1, new_account_status: "pending", turnstile: "require", updated_at: null, updated_by: null }).methods).toEqual([]);
+    expect(parsePolicy({ enabled: 1, methods: "not json", new_account_status: "pending", provider: "cap", updated_at: null, updated_by: null }).methods).toEqual([]);
   });
 
   it("a missing table reads as closed, not as an error", async () => {
@@ -116,18 +131,47 @@ describe("the switch and the ways in", () => {
   it("a way that needs email is not offered on an instance with no email transport", async () => {
     const s = setup({ EMAIL: undefined });
     // Saved while email existed, then the transport went away: the read must still refuse the emailed code.
-    s.DB.sqlite.prepare("INSERT INTO registration_policy (id, enabled, methods, require_email_verification, new_account_status, turnstile) VALUES (1, 1, ?, 0, 'active', 'inherit') ON CONFLICT (id) DO UPDATE SET enabled = 1, methods = excluded.methods").run(JSON.stringify(["email_code", "passkey"]));
+    s.DB.sqlite.prepare("INSERT INTO registration_policy (id, enabled, methods, new_account_status, provider) VALUES (1, 1, ?, 'active', 'none') ON CONFLICT (id) DO UPDATE SET enabled = 1, methods = excluded.methods, provider = 'none'").run(JSON.stringify(["email_code", "passkey"]));
     const r = await registrationPolicy(s.env);
     expect(r.methods).toEqual(["passkey"]);
     expect(methodProblem(r, "email_code")).toMatch(/can't send a sign-up code/);
+    expect(emailTransport(s.env)).toBe(false);
   });
 
-  it("turning on a way that needs email without an email transport is refused when saving", async () => {
+  it("the emailed-code way can't be turned on without an email transport", async () => {
     const s = setup({ EMAIL: undefined });
     await expect(save(s, { enabled: true, methods: ["email_code"] })).rejects.toMatchObject({ status: 422 });
-    await expect(save(s, { enabled: true, methods: ["password"], requireEmailVerification: true })).rejects.toMatchObject({ status: 422 });
-    // Passkey and password without verification need no email.
     await expect(save(s, { enabled: true, methods: ["passkey", "password"] })).resolves.toBeTruthy();
+  });
+
+  it("a production instance needs an email transport before registration opens", async () => {
+    const s = setup({ EMAIL: undefined, SMTP_URL: undefined });
+    s.instance("production");
+    await expect(save(s, { enabled: true, methods: ["password"] })).rejects.toMatchObject({ status: 422 });
+    // Saved while email worked, then it went away: the read refuses, with the reason.
+    stored(s, { enabled: true, methods: ["password"] });
+    const r = await registrationPolicy(s.env);
+    expect(r.enabled).toBe(false);
+    expect(r.blockedBy).toBe("email");
+    expect(signupProblem(r)).toMatch(/no email transport.*demo mode/);
+  });
+
+  it("demo mode lets a bare instance open registration, for trying it out", async () => {
+    const s = setup({ EMAIL: undefined, SMTP_URL: undefined });
+    s.instance("demo");
+    await expect(save(s, { enabled: true, methods: ["password"] })).resolves.toBeTruthy();
+    const r = await registrationPolicy(s.env);
+    expect(r.enabled).toBe(true);
+    expect(r.emailRequired).toBe(false);
+  });
+
+  it("production with email set up opens as usual", async () => {
+    const s = setup({ SMTP_URL: "smtps://user@mail.example.com:465", SMTP_PASSWORD: "pw" });
+    s.instance("production");
+    await expect(save(s, { enabled: true, methods: ["email_code", "password"] })).resolves.toBeTruthy();
+    const r = await registrationPolicy(s.env);
+    expect(r.enabled).toBe(true);
+    expect(r.methods).toEqual(["email_code", "password"]);
   });
 
   it("an open switch with no way in is refused when saving", async () => {
@@ -137,8 +181,8 @@ describe("the switch and the ways in", () => {
   });
 
   it("the admin form drops unknown values rather than trusting them", () => {
-    const form = { b: (n: string) => n === "enabled", all: (n: string) => (n === "methods" ? ["password", "root", "passkey"] : []), s: (n: string) => (n === "turnstile" ? "off" : n === "new_account_status" ? "superuser" : "") };
-    expect(policyFromForm(form)).toMatchObject({ enabled: true, methods: ["passkey", "password"], newAccountStatus: "active", turnstile: "inherit" });
+    const form = { b: (n: string) => n === "enabled", all: (n: string) => (n === "methods" ? ["password", "root", "passkey"] : []), s: (n: string) => (n === "provider" ? "off" : n === "new_account_status" ? "superuser" : "") };
+    expect(policyFromForm(form)).toMatchObject({ enabled: true, methods: ["passkey", "password"], newAccountStatus: "active", provider: "auto" });
   });
 });
 
@@ -162,41 +206,118 @@ describe("the environment override (SIGNUP=open)", () => {
   });
 });
 
-describe("Turnstile", () => {
-  it("require without keys refuses sign-up with a readable reason", async () => {
-    const s = setup({ PUBLIC_URL: PUB, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
-    await save(s, { enabled: true, methods: ["passkey"], turnstile: "require" });
-    const r = await registrationPolicy(s.env);
-    expect(r.turnstile.mode).toBe("missing");
-    expect(turnstileProblem(r)).toMatch(/requires Turnstile, but it has no TURNSTILE_SITE_KEY/);
+describe("the bot check", () => {
+  const noKeys = { PUBLIC_URL: PUB, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined };
+  const capEnv = { CAP_ENDPOINT: "https://cap.example.com", CAP_SITE_KEY: "sitekey1", CAP_SECRET: "s3cret" };
+
+  it("auto takes cap.js when it is set up, else Turnstile, else nothing", async () => {
+    const withBoth = setup({ ...capEnv, TURNSTILE_SITE_KEY: "site", TURNSTILE_SECRET: "secret" });
+    await save(withBoth, { enabled: true, methods: ["passkey"], provider: "auto" });
+    const r1 = await registrationPolicy(withBoth.env);
+    expect(r1.captcha.kind).toBe("cap");
+    expect(r1.captcha.capApiEndpoint).toBe("https://cap.example.com/sitekey1/");
+    expect(r1.captcha.field).toBe("cap-token");
+
+    const turnstileOnly = setup({ TURNSTILE_SITE_KEY: "site", TURNSTILE_SECRET: "secret" });
+    await save(turnstileOnly, { enabled: true, methods: ["passkey"], provider: "auto" });
+    const r2 = await registrationPolicy(turnstileOnly.env);
+    expect(r2.captcha).toMatchObject({ kind: "turnstile", siteKey: "site", field: "cf-turnstile-response" });
+
+    // Nothing set up on a deployed instance: opening registration is refused, and a stored policy
+    // reports the missing keys instead of letting a script through.
+    const bare = noKeysSetup();
+    await expect(save(bare, { enabled: true, methods: ["passkey"], provider: "auto" })).rejects.toMatchObject({ status: 422 });
+    stored(bare, { enabled: true, methods: ["passkey"], provider: "auto" });
+    const r3 = await registrationPolicy(bare.env);
+    expect(r3.captcha.missing).toMatch(/TURNSTILE_SITE_KEY/);
+    expect(r3.blockedBy).toBe("captcha");
   });
 
-  it("without keys the sign-in page doesn't link to a sign-up that can only refuse, and the page says why", async () => {
-    const s = setup({ PUBLIC_URL: PUB, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
-    await save(s, { enabled: true, methods: ["password"] });
+  it("a chosen provider that isn't set up refuses, and the page says so", async () => {
+    const s = noKeysSetup();
+    await expect(save(s, { enabled: true, methods: ["passkey"], provider: "turnstile" })).rejects.toMatchObject({ status: 422 });
+    stored(s, { enabled: true, methods: ["passkey"], provider: "turnstile" });
+    const r = await registrationPolicy(s.env);
+    expect(r.enabled).toBe(false);
+    expect(r.blockedBy).toBe("captcha");
+    expect(signupProblem(r)).toMatch(/requires Turnstile|has no TURNSTILE_SITE_KEY/);
+    expect(registrationSummary(r)).toMatch(/TURNSTILE_SITE_KEY|Turnstile/);
+  });
+
+  it("cap chosen without a server refuses with the variables it needs", async () => {
+    const s = setup({ ...noKeys });
+    await expect(save(s, { enabled: true, methods: ["passkey"], provider: "cap" })).rejects.toMatchObject({ status: 422 });
+    stored(s, { enabled: true, methods: ["passkey"], provider: "cap" });
+    const r = await registrationPolicy(s.env);
+    expect(r.blockedBy).toBe("captcha");
+    expect(signupProblem(r)).toMatch(/CAP_ENDPOINT, CAP_SITE_KEY and CAP_SECRET/);
+  });
+
+  it("none is allowed and verifies nothing", async () => {
+    const s = setup({ ...noKeys });
+    await save(s, { enabled: true, methods: ["password"], provider: "none" });
     const r = await registrationPolicy(s.env);
     expect(r.enabled).toBe(true);
-    expect(r.blockedBy).toBe("turnstile");
-    expect(registrationSummary(r)).toMatch(/nobody can register.*TURNSTILE_SITE_KEY/);
-    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
-    const html = await (await app.fetch(new Request(`${PUB}/login`, { headers: { accept: "text/html" } }), s.env, ctx)).text();
-    expect(html).not.toMatch(/href="\/signup"/);
-    // The sign-up page itself still answers with the readable reason.
-    const page = await app.fetch(new Request(`${PUB}/signup/password`, { headers: { accept: "text/html" } }), s.env, ctx);
-    expect(page.status).toBe(503);
+    expect(r.captcha.kind).toBe("none");
   });
 
-  it("inherit uses the instance's keys when present", async () => {
-    const s = setup({ TURNSTILE_SITE_KEY: "site", TURNSTILE_SECRET: "secret" });
+  it("the local machine without keys stays open (no check) as before", async () => {
+    const s = setup({ PUBLIC_URL: LOCAL, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
     const r = await registrationPolicy(s.env);
-    expect(r.turnstile).toEqual({ mode: "verify", siteKey: "site" });
+    expect(r.captcha.kind).toBe("none");
   });
 
-  it("the check is never switched off from the page", () => {
-    expect(["inherit", "require"]).toEqual(expect.arrayContaining([DEFAULT_POLICY.turnstile]));
-    expect(parsePolicy({ enabled: 1, methods: "[]", require_email_verification: 0, new_account_status: "active", turnstile: "off", updated_at: null, updated_by: null }).turnstile).toBe("inherit");
+  it("a cap.js token is checked with the site key's secret at /siteverify", async () => {
+    const calls: Array<{ url: string; body: string }> = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      calls.push({ url, body: String(init.body) });
+      return Response.json({ success: true });
+    });
+    try {
+      const s = setup({ ...capEnv });
+      await save(s, { enabled: true, methods: ["passkey"], provider: "cap" });
+      const r = await registrationPolicy(s.env);
+      expect(r.captcha.kind).toBe("cap");
+      const cap = await capConfiguration(s.env);
+      expect(cap).toMatchObject({ endpoint: "https://cap.example.com", siteKey: "sitekey1", secret: "s3cret", source: "environment" });
+      expect(await verifyCaptcha(r.captcha, cap, "token-abc", "203.0.113.9")).toBe(true);
+      expect(calls[0]!.url).toBe("https://cap.example.com/sitekey1/siteverify");
+      expect(JSON.parse(calls[0]!.body)).toEqual({ secret: "s3cret", response: "token-abc" });
+      vi.stubGlobal("fetch", async () => Response.json({ success: false }));
+      expect(await verifyCaptcha(r.captcha, cap, "token-abc", null)).toBe(false);
+      expect(await verifyCaptcha(r.captcha, cap, "", null)).toBe(false);
+      vi.stubGlobal("fetch", async () => {
+        throw new Error("down");
+      });
+      expect(await verifyCaptcha(r.captcha, cap, "token-abc", null)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("cap.js set in Settings beats the deployment's variables", async () => {
+    const s = setup({ ...capEnv });
+    const sealed = await encryptSecret(s.env, "captcha:cap", "stored-secret");
+    s.DB.sqlite.prepare("INSERT INTO captcha_settings (id, cap_endpoint, cap_site_key, cap_secret, updated_at, updated_by) VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET cap_endpoint = excluded.cap_endpoint, cap_site_key = excluded.cap_site_key, cap_secret = excluded.cap_secret").run("https://cap.internal.example", "savedkey", sealed, at, "root");
+    const cap = await capConfiguration(s.env);
+    expect(cap).toMatchObject({ endpoint: "https://cap.internal.example", siteKey: "savedkey", secret: "stored-secret", source: "settings" });
+  });
+
+  it("a cap.js server must be https (or loopback) and a site key must look like one", () => {
+    expect(normalCapEndpoint("http://cap.example.com")).toBeNull();
+    expect(normalCapEndpoint("https://cap.example.com/")).toBe("https://cap.example.com");
+    expect(normalCapEndpoint("http://localhost:3000")).toBe("http://localhost:3000");
+    expect(normalCapEndpoint("javascript:alert(1)")).toBeNull();
+    expect(normalCapSiteKey("ab")).toBeNull();
+    expect(normalCapSiteKey("space key")).toBeNull();
+    expect(normalCapSiteKey("AbC123")).toBe("AbC123");
   });
 });
+
+/** An instance that isn't the local machine and has no bot check configured at all. */
+function noKeysSetup() {
+  return setup({ PUBLIC_URL: PUB, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined, CAP_ENDPOINT: undefined, CAP_SITE_KEY: undefined, CAP_SECRET: undefined });
+}
 
 describe("pending accounts", () => {
   it("a pending password account is created, signs in later, and can't use the site", async () => {
@@ -255,17 +376,7 @@ describe("the emailed-code path", () => {
     const { code } = await signups.issue("new@example.com", "203.0.113.9");
     const wrong = String((Number(code) + 1) % 1_000_000).padStart(6, "0");
     expect(await signups.check("new@example.com", wrong)).toEqual({ ok: false, left: 4 });
-    expect(await signups.check("new@example.com", code)).toEqual({ ok: true, pending: null });
-  });
-
-  it("a password sign-up's code carries the password, hashed, and no plaintext", async () => {
-    const s = setup();
-    const signups = new Signups(s.env);
-    const { code } = await signups.issue("pw@example.com", "203.0.113.9", { login: "pw", name: null, passwordHash: "pbkdf2-sha256$210000$c2FsdA$aGFzaA", method: "password" });
-    const row = s.DB.sqlite.prepare("SELECT * FROM signup_codes").get() as Record<string, unknown>;
-    expect(JSON.stringify(row)).not.toContain(code);
-    const r = await signups.check("pw@example.com", code);
-    expect(r).toMatchObject({ ok: true, pending: { login: "pw", method: "password", passwordHash: "pbkdf2-sha256$210000$c2FsdA$aGFzaA" } });
+    expect(await signups.check("new@example.com", code)).toEqual({ ok: true });
   });
 
   it("an address is normalised before it is compared", () => {
@@ -364,15 +475,15 @@ describe("refusals on the form", () => {
 
   it("a password sign-up that needs Turnstile and has no keys says so on the page, with 503, and creates nothing", async () => {
     const s = setup({ PUBLIC_URL: PUB, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
-    await save(s, { enabled: true, methods: ["password"], turnstile: "require" });
+    stored(s, { enabled: true, methods: ["password"], provider: "turnstile" });
     const r = await post(s, "/signup/password", { email: "b@example.com", ...pw });
     expect(r.status).toBe(503);
-    expect(await r.text()).toMatch(/requires Turnstile, but it has no TURNSTILE_SITE_KEY/);
+    expect(await r.text()).toMatch(/set to check sign-ups with Cloudflare Turnstile, but it has no TURNSTILE_SITE_KEY and TURNSTILE_SECRET/);
     expect(s.DB.sqlite.prepare("SELECT count(*) AS n FROM accounts WHERE email = 'b@example.com'").get()).toEqual({ n: 0 });
   });
 
   it("a password below the minimum is refused on the page and nothing is stored", async () => {
-    const s = setup({ PUBLIC_URL: LOCAL });
+    const s = setup({ PUBLIC_URL: LOCAL, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
     await save(s, { enabled: true, methods: ["password"] });
     const r = await post(s, "/signup/password", { email: "c@example.com", login: "cee", password: "short", confirm: "short" });
     expect(r.status).toBe(422);
@@ -381,7 +492,7 @@ describe("refusals on the form", () => {
   });
 
   it("a password sign-up creates an active account with the password stored, and signs it in", async () => {
-    const s = setup({ PUBLIC_URL: LOCAL });
+    const s = setup({ PUBLIC_URL: LOCAL, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
     await save(s, { enabled: true, methods: ["password"] });
     const r = await post(s, "/signup/password", { email: "dee@example.com", login: "dee", name: "Dee", ...pw });
     expect(r.status).toBe(303);
@@ -393,7 +504,7 @@ describe("refusals on the form", () => {
   });
 
   it("with pending new accounts, a password sign-up creates a pending account that can't use the site", async () => {
-    const s = setup({ PUBLIC_URL: LOCAL });
+    const s = setup({ PUBLIC_URL: LOCAL, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
     await save(s, { enabled: true, methods: ["password"], newAccountStatus: "pending" });
     await post(s, "/signup/password", { email: "eve@example.com", login: "eve", ...pw });
     const row = s.DB.sqlite.prepare("SELECT status FROM accounts WHERE email = 'eve@example.com'").get() as { status: string };
@@ -412,7 +523,7 @@ describe("an address nobody proved grants nothing", () => {
   const account = (s: ReturnType<typeof setup>, email: string) => s.DB.sqlite.prepare("SELECT * FROM accounts WHERE lower(email) = ?").get(email) as Record<string, unknown> | undefined;
 
   it("a password sign-up with a bootstrap administrator's address does not make a site administrator", async () => {
-    const s = setup({ PUBLIC_URL: LOCAL, BOOTSTRAP_ADMINS: "ops@example.com" });
+    const s = setup({ PUBLIC_URL: LOCAL, BOOTSTRAP_ADMINS: "ops@example.com", TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
     await save(s, { enabled: true, methods: ["password"] });
     const r = await post(s, "/signup/password", { email: "ops@example.com", login: "ops", ...pw });
     expect(r.status).toBe(303);
@@ -420,7 +531,7 @@ describe("an address nobody proved grants nothing", () => {
   });
 
   it("an unproven account doesn't take the invitations sent to its address", async () => {
-    const s = setup({ PUBLIC_URL: LOCAL });
+    const s = setup({ PUBLIC_URL: LOCAL, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
     s.DB.sqlite.prepare("INSERT INTO accounts (id, login, kind, status, created_at) VALUES ('o1', 'acme', 'org', 'active', ?)").run(at);
     s.DB.sqlite.prepare("INSERT INTO invites (id, org_id, email, role, token_hash, invited_by, created_at, expires_at) VALUES ('i9', 'o1', 'victim@example.com', 'admin', 'h9', 'u-root', ?, '2999-01-01T00:00:00.000Z')").run(at);
     await save(s, { enabled: true, methods: ["password"], newAccountStatus: "pending" });
@@ -437,7 +548,7 @@ describe("an address nobody proved grants nothing", () => {
   });
 
   it("whoever proves the address later gets it; the unproven account keeps its login", async () => {
-    const s = setup({ PUBLIC_URL: LOCAL });
+    const s = setup({ PUBLIC_URL: LOCAL, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
     await save(s, { enabled: true, methods: ["password"] });
     await post(s, "/signup/password", { email: "real@example.com", login: "squatter", ...pw });
     const dir = new Directory(s.env);
@@ -449,41 +560,14 @@ describe("an address nobody proved grants nothing", () => {
   });
 
   it("a proven account is not taken over by a later unproven sign-up", async () => {
-    const s = setup({ PUBLIC_URL: LOCAL });
+    const s = setup({ PUBLIC_URL: LOCAL, TURNSTILE_SITE_KEY: undefined, TURNSTILE_SECRET: undefined });
     await save(s, { enabled: true, methods: ["password"] });
     const r = await post(s, "/signup/password", { email: "root@example.com", login: "notroot", ...pw });
     expect(r.status).toBe(409);
     expect(account(s, "root@example.com")).toMatchObject({ login: "root", site_admin: 1 });
   });
 
-  it("with email verification on, the page reads the same for a taken and a free address", async () => {
-    const s = setup({ PUBLIC_URL: LOCAL });
-    await save(s, { enabled: true, methods: ["password"], requireEmailVerification: true });
-    const taken = await post(s, "/signup/password", { email: "root@example.com", login: "x1", ...pw });
-    const free = await post(s, "/signup/password", { email: "nobody@example.com", login: "x2", ...pw });
-    expect(taken.status).toBe(200);
-    expect(free.status).toBe(200);
-    expect(await taken.text()).toMatch(/We sent a code to <b>root@example\.com<\/b>/);
-    expect(await free.text()).toMatch(/We sent a code to <b>nobody@example\.com<\/b>/);
-    // The taken address's code carries no password: entering it can't create anything.
-    const rows = s.DB.sqlite.prepare("SELECT email, password_hash FROM signup_codes ORDER BY email").all();
-    expect(rows).toEqual([
-      { email: "nobody@example.com", password_hash: expect.stringMatching(/^pbkdf2-sha256\$/) },
-      { email: "root@example.com", password_hash: null },
-    ]);
-  });
 
-  it("a code-confirmed password sign-up creates a proven account", async () => {
-    const s = setup({ PUBLIC_URL: LOCAL });
-    await save(s, { enabled: true, methods: ["password"], requireEmailVerification: true });
-    const signups = new Signups(s.env);
-    const { code } = await signups.issue("ok@example.com", "198.51.100.7", { login: "okay", name: null, passwordHash: "pbkdf2-sha256$210000$c2FsdA$aGFzaA", method: "password" });
-    const r = await post(s, "/signup/verify", { email: "ok@example.com", code });
-    expect(r.status).toBe(303);
-    expect(account(s, "ok@example.com")).toMatchObject({ login: "okay", email_unverified: 0, status: "active" });
-    // The used code no longer holds the hash.
-    expect(s.DB.sqlite.prepare("SELECT password_hash FROM signup_codes").get()).toEqual({ password_hash: null });
-  });
 });
 
 describe("the page itself", () => {

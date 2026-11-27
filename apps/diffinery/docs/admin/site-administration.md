@@ -12,7 +12,8 @@ Site administrators have admin on every repository, can act as an owner of every
 | Page | Path | What it is for |
 | --- | --- | --- |
 | **People and invitations** | `/settings/admin` | Access requests, instance invitations, the list of users, account status and sign-in links |
-| **Registration** | `/settings/admin/registration` | Whether people can create an account themselves, which ways in are on, the status of new accounts and the bot check |
+| **Registration** | `/settings/admin/registration` | Whether people can create an account themselves, which ways in are on, the status of new accounts, and the bot check (Turnstile, cap.js or none) |
+| **Instance** | `/settings/admin/instance` | Demo or production: what the instance advertises and which project pages it serves |
 | **Early access** | `/settings/admin/early-access` | Requests from people without an invitation, to invite, decline or delete |
 | **Contact messages** | `/settings/admin/contact` | Messages from the contact form, to read, answer, mark handled or spam, and delete |
 | **Reports** | `/settings/admin/reports` | What people reported as abusive, to look at and resolve |
@@ -135,19 +136,64 @@ Both answer `204`. Anyone else gets `403 site administrators only`.
 
 ## Registration
 
-**Settings → Site administration → Registration** (`/settings/admin/registration`) decides whether people can create an account without an invitation. Invitations and the first-run page at `/setup` always work, whatever is set here. A fresh instance is invite-only: nothing is open until you save the page with **Let people create accounts themselves** ticked.
+**Settings → Site administration → Registration** (`/settings/admin/registration`) decides whether people can create an account without an invitation. Invitations and the first-run page at `/setup` always work, whatever is set here. A fresh instance is closed: nothing is open until you tick **Let people create accounts themselves** and save.
 
-The top of the page says in one sentence what applies now, for example "Open: password, passkey. A new account is active as soon as it exists."
+The top of the page says what applies now, for example "Open: password, passkey. A new account is active as soon as it exists. Turnstile."
 
-- **Let people create accounts themselves**: the switch. Off, the sign-in page says the instance is invite-only and every sign-up page, and every sign-up form, refuses. It takes effect on the next request; nothing is cached.
-- **Ways in**: each is on by itself, and you can turn on more than one. **Emailed code** sends a 6-digit code to the address, then the person picks a username and creates a passkey. **Passkey** asks for an address and a username, then creates the passkey, with no email. **Password** takes an address, a username and a password, and creates the account at once. A way that needs email (the emailed code, or a password with **Require email verification**) can't be turned on on an instance with no email set up; the page says so.
-- **Require email verification for password sign-ups**: a password sign-up emails a code first, and the account is created when the code is entered. Off, a password account is created without confirming the address.
-- **New account status**: **Active** lets the new person use the site at once. **Pending** lets them sign in, but they can't use the site until you approve them under **People and invitations**.
-- **Bot check (Turnstile)**: **As the instance is set up** uses the Turnstile keys the deploy set (and skips the check on the local machine). **Required** refuses sign-up unless both keys are set, even locally. The page shows which applies.
+- **Let people create accounts themselves**: the switch. Off, the sign-in page says the instance is invite-only and every sign-up page and form refuses. It takes effect on the next request.
+- **Ways in**: each is on by itself; turn on as many as you like.
+  - **Emailed code**: someone enters an address, gets a 6-digit code, then picks a username and creates a passkey. This is the only way in that confirms the address. It needs an email transport (`SMTP_URL` or the `EMAIL` binding).
+  - **Passkey**: an address, a username and a passkey, with no email.
+  - **Password**: an address, a username and a password, with no email.
+  - Passkey and password never confirm the address. An account made that way is usable, but it grants nothing by itself: it is never a bootstrap administrator, it takes no invitation sent to its address, and if someone later proves the address (with an invitation's email, an emailed sign-up code or email recovery) the address moves to them. Both also tell the visitor when an address already has an account, because no email is sent to its owner instead.
+- **New account status**: **Active** lets people use the site at once. **Pending** lets them sign in but not use the site until you approve them under **People and invitations**.
+- **Bot check**: which check runs in front of the sign-up forms. See [Bot checks](#bot-checks).
 
-If the deployment sets `SIGNUP=open`, the page says so: registration stays on and the emailed-code way stays on whatever you save. `SIGNUP` can only open registration, so to close the instance, remove the variable from the deployment and turn the switch off here. See [SIGNUP](/docs/self-hosting/configuration#signup).
+A production instance needs an email transport before registration can be opened, because an address can't be confirmed without one; the page refuses and says so. Demo mode relaxes it, so a bare install can be tried out; see [Instance](#instance).
 
-Every save is in the [audit log](/docs/security/audit-log) as `registration.policy.update`, with what it was and what it is. Every new account made through a way in is recorded there too (`signup` or `account.signup`).
+### Bot checks
+
+| Choice | What it does |
+| --- | --- |
+| **Automatic** (default) | cap.js when it is set up, else Turnstile when its keys are set, else none on the local machine. |
+| **Cloudflare Turnstile** | Turnstile's widget, with `TURNSTILE_SITE_KEY` and the `TURNSTILE_SECRET` secret. |
+| **cap.js** | [cap.js](https://capjs.js.org), a self-hosted proof-of-work CAPTCHA: no Google, nothing from Cloudflare, the widget served from jsDelivr. |
+| **None** | No check. The rate limits and the daily email limits still apply. |
+
+A check that is chosen but not set up refuses every sign-up with a readable reason (and the page says which keys are missing); it never silently lets a script through.
+
+### cap.js
+
+cap.js needs a server of its own (`capd`, see its documentation) plus a site key and that key's secret from its dashboard (not the capd `ADMIN_KEY`). You can give the instance one two ways:
+
+- **Settings → Registration → cap.js server**: enter the server address, the site key and the secret. The secret is sealed with `MASTER_KEY` before it is stored and is never shown again. Saved here, it applies to the next sign-up and wins over the deployment's variables.
+- **The deployment**: `CAP_ENDPOINT`, `CAP_SITE_KEY` and the `CAP_SECRET` secret (see [Configuration](/docs/self-hosting/configuration#cap_endpoint)). On celld, `CAP_SECRET` is copied into the rendered config like every other secret.
+
+Leaving the server empty in Settings falls back to the deployment's variables.
+
+### The audit log
+
+Each save is `registration.policy.update`, `captcha.settings.update` for the cap.js server, and `instance.settings.update` for the mode, each with what it was and what it is. New accounts are `signup` (the passkey ways) or `account.signup` (the password way).
+
+## Instance
+
+**Settings → Site administration → Instance** (`/settings/admin/instance`) decides what this instance says about itself. It changes pages, never data: repositories, issues, pull requests, tokens, git and the API are the same in both modes.
+
+| | **Demo** (the default) | **Production** |
+| --- | --- | --- |
+| Footer | The project footer: what Diffinery is, "Deploy your own", Product and Compare columns | A plain footer: Docs, Security, Status, Contact |
+| Header | Product and Compare links, and the "Star on GitHub" button | Neither |
+| Project pages | `/features`, `/compare/*`, `/agents`, `/performance`, `/blog`, `/about` and the other pages about Diffinery the product are served | `404` |
+| Docs | Served | Served |
+| `/llms.txt`, `/llms-full.txt` | The docs and the project's pages | The docs only |
+| `sitemap.xml`, `robots.txt`, IndexNow | The instance's pages and public repositories | The same, without the project's pages |
+| `/mcp`, `/api/v3/diffinery` | Served | `404` |
+| `/api/v3`, GraphQL, git | Served | Served |
+| `/setup` | Never asks for an email transport | Never asks for an email transport |
+
+A fresh instance starts in demo mode, so the pages it shows still point at the project. Switch to production when the instance is someone's Git host rather than a place to try Diffinery.
+
+**Require an email transport before registration can be opened**: on by default and enforced in production. Off lets a production instance open registration without email, which is only sensible for a demo or an instance that accepts unconfirmed addresses.
 
 ## Early access
 

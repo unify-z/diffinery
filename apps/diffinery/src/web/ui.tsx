@@ -20,6 +20,8 @@ import { MoreMenu, ReportItem } from "./moderation.js";
 import { SeoHead, SITE } from "./seo.js";
 import { avatarPath } from "../http/avatars.js";
 import { TURNSTILE_ORIGIN, TURNSTILE_SCRIPT } from "../auth/signup.js";
+import { CAP_WIDGET_ORIGIN, CAP_WIDGET_URL } from "../auth/captcha.js";
+import { isProduction } from "../lib/instance.js";
 import { imageProxy } from "../lib/camo.js";
 import { formatStars, GITHUB_REPO, githubStars } from "./github-stars.js";
 
@@ -318,7 +320,13 @@ export interface PageOpts {
   /** Reload the page every this many seconds (progress pages without live updates). */
   refresh?: number;
   /** Load Cloudflare Turnstile (the sign-up page): its script and iframe come from challenges.cloudflare.com. */
-  turnstile?: boolean;
+  /**
+   * The bot check the page carries: Turnstile's widget, cap.js's, or none. It decides the scripts
+   * the page loads and what its Content-Security-Policy allows (auth/captcha.ts).
+   */
+  botCheck?: "turnstile" | "cap" | "none";
+  /** cap.js only: its API base (`https://cap.example.com/sitekey/`), so connect-src can allow it. */
+  botCheckApi?: string;
   /** Fetch the Kumo islands bundle at low priority on a page without islands, for the pages that follow it (sign-in). */
   prefetchKumo?: boolean;
   /** Another place this page's forms may lead (CSP form-action), e.g. the CLI's loopback callback after approving a sign-in. */
@@ -397,17 +405,32 @@ const RepoHeader: FC<{ r: RepoCtx; watch?: WatchLevel; t: string }> = ({ r, watc
   );
 };
 
-function csp(nonce: string, c: AppContext, turnstile?: boolean, formAction?: string): string {
+/** The origin of an absolute URL, or null when it isn't one. */
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+function csp(nonce: string, c: AppContext, botCheck?: "turnstile" | "cap" | "none", capApiEndpoint?: string, formAction?: string): string {
   const host = new URL(c.req.url).host;
+  // Turnstile is a frame from Cloudflare. cap.js is a script from jsDelivr that solves a proof of
+  // work in a Worker built from a Blob, instantiates WebAssembly and fetches its solvers from the
+  // same CDN. Only pages that carry the check allow any of it.
+  const cap = botCheck === "cap";
+  const capApi = cap && capApiEndpoint ? originOf(capApiEndpoint) : null;
   return [
     "default-src 'self'",
-    `script-src 'nonce-${nonce}'${turnstile ? ` ${TURNSTILE_ORIGIN}` : ""}`,
-    ...(turnstile ? [`frame-src ${TURNSTILE_ORIGIN}`] : []),
+    `script-src 'nonce-${nonce}'${botCheck === "turnstile" ? ` ${TURNSTILE_ORIGIN}` : ""}${cap ? ` ${CAP_WIDGET_ORIGIN} 'wasm-unsafe-eval' blob:` : ""}`,
+    ...(botCheck === "turnstile" ? [`frame-src ${TURNSTILE_ORIGIN}`] : []),
+    ...(cap ? [`worker-src blob: ${CAP_WIDGET_ORIGIN}`] : []),
     "style-src 'self' 'unsafe-inline'",
     // Images from other sites in Markdown come through the image proxy (/-/camo/, lib/camo.ts), so
     // no page loads one directly. blob: previews a picture before it is uploaded.
     "img-src 'self' data: blob:",
-    `connect-src 'self' wss://${host} ws://${host}`,
+    `connect-src 'self' wss://${host} ws://${host}${cap ? ` ${CAP_WIDGET_ORIGIN}${capApi ? ` ${capApi}` : ""}` : ""}`,
     "font-src 'self'",
     "object-src 'none'",
     "base-uri 'none'",
@@ -509,8 +532,12 @@ async function renderPage(c: AppContext, opts: PageOpts, body: Child, watch?: Wa
   const me = p?.type === "account" ? p.account : null;
   const active = me?.status === "active";
   // Visitors get a Star button in the header and footer; signed-in people's pages stay as they are.
-  const stars = active ? null : await githubStars(c);
-  c.header("content-security-policy", csp(nonce, c, opts.turnstile, opts.formAction));
+  // Demo and production (lib/instance.ts): production is a Git host that doesn't advertise the
+  // software it runs on, so no project footer, no Product/Compare links, no GitHub star button.
+  const production = await isProduction(c.env);
+  const marketing = !active && !opts.gitHost && !production;
+  const stars = marketing ? await githubStars(c) : null;
+  c.header("content-security-policy", csp(nonce, c, opts.botCheck, opts.botCheckApi, opts.formAction));
   c.header("x-frame-options", "DENY");
   c.header("x-content-type-options", "nosniff");
   c.header("referrer-policy", "same-origin");
@@ -544,7 +571,8 @@ async function renderPage(c: AppContext, opts: PageOpts, body: Child, watch?: Wa
           </>
         ) : null}
         {opts.head ?? null}
-        {opts.turnstile ? <script nonce={nonce} src={TURNSTILE_SCRIPT} async defer></script> : null}
+        {opts.botCheck === "turnstile" ? <script nonce={nonce} src={TURNSTILE_SCRIPT} async defer></script> : null}
+        {opts.botCheck === "cap" ? <script nonce={nonce} src={CAP_WIDGET_URL} async defer></script> : null}
       </head>
       <body
         data-repo={r ? `${r.repo.owner_login}/${r.repo.name}` : undefined}
@@ -566,7 +594,7 @@ async function renderPage(c: AppContext, opts: PageOpts, body: Child, watch?: Wa
               </button>
             ) : null}
             <nav>
-              {!active && !opts.gitHost ? (
+              {marketing ? (
                 <>
                   <a href="/features" class="nav-site">
                     Product
@@ -579,7 +607,7 @@ async function renderPage(c: AppContext, opts: PageOpts, body: Child, watch?: Wa
               <a href="/docs" title="Documentation">
                 Docs
               </a>
-              {active || opts.gitHost ? null : <StarButton stars={stars} compact class="nav-star" />}
+              {marketing ? <StarButton stars={stars} compact class="nav-star" /> : null}
               {active && me ? (
                 <>
                   <a href="/new" title="New repository">
@@ -615,11 +643,11 @@ async function renderPage(c: AppContext, opts: PageOpts, body: Child, watch?: Wa
           {raw(content)}
         </main>
         <footer class="site-foot">
-          {active || opts.gitHost ? null : <SiteFooter stars={stars} />}
+          {marketing ? <SiteFooter stars={stars} /> : null}
           <div class="wrap">
             <div class="foot-bar">
               <span>© {new Date().getUTCFullYear()} Diffinery</span>
-              {active || opts.gitHost ? (
+              {!marketing ? (
                 <nav aria-label="Footer">
                   <a href="/docs">Docs</a>
                   <a href="/docs/security/disclosure">Security</a>

@@ -97,7 +97,7 @@ describe("sign-up codes", () => {
     const { code, expiresAt } = await signups.issue("new@example.com", "203.0.113.9");
     expect(Date.parse(expiresAt) - Date.now()).toBeGreaterThan(9 * 60_000);
     expect(Date.parse(expiresAt) - Date.now()).toBeLessThanOrEqual(10 * 60_000);
-    expect(await signups.check("new@example.com", code)).toEqual({ ok: true, pending: null });
+    expect(await signups.check("new@example.com", code)).toEqual({ ok: true });
     expect(await signups.check("new@example.com", code)).toEqual({ ok: false, left: 0 });
     // Another address's code is another address's.
     const other = await signups.issue("other@example.com", "203.0.113.9");

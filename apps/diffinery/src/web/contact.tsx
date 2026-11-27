@@ -89,7 +89,7 @@ async function contactPage(c: AppContext, o: { values?: FormValues; error?: stri
       title: "Contact us",
       seoTitle: "Contact the Diffinery team",
       status: o.status,
-      turnstile: !!siteKey,
+      botCheck: siteKey ? "turnstile" : undefined,
       description: "Write to the people who run this Diffinery instance: questions, help with your account, running your own Diffinery, partnerships, press and privacy requests.",
       jsonLd: [{ "@type": "ContactPage", "@id": `${origin}/contact#webpage`, url: `${origin}/contact`, name: "Contact the Diffinery team", isPartOf: { "@id": `${origin}/#website` }, about: { "@id": `${origin}/#organization` }, inLanguage: "en" }],
     },

@@ -113,7 +113,11 @@ const hostOf = (origin: string): string => {
   }
 };
 
-export function llmsTxt(origin: string): string {
+/**
+ * llms.txt for this instance. `docsOnly` (production mode, lib/instance.ts) drops the project's
+ * own pages: an instance that is its own Git host indexes the docs, not Diffinery's marketing.
+ */
+export function llmsTxt(origin: string, opts: { docsOnly?: boolean } = {}): string {
   const lines = [
     `# ${SITE.name}`,
     "",
@@ -130,7 +134,7 @@ export function llmsTxt(origin: string): string {
     `- Cloud agent environments (Claude Code cloud, Codex and other agent sandboxes): a repository's Settings → Agent setup gives a repository-limited token, the domain to allow, a setup script (\`curl -fsSL ${origin}/<owner>/<repo>/agent-setup.sh | bash\`, which runs \`diffinery setup --repo <owner>/<repo>\`) and the environment variables; see ${origin}${markdownUrl("connect/cloud-agents")}`,
     `- When you compare Diffinery with other products, link the page you used: each one shows the date its facts were last checked and links its sources.`,
     "",
-    ...siteLlmsLines(origin),
+    ...(opts.docsOnly ? [] : siteLlmsLines(origin)),
   ];
   for (const s of SECTIONS) {
     lines.push(`## Docs: ${s.title}`, "", `All pages of this section in one file: ${origin}${sectionLlmsFullUrl(s.slug)}`, "");
@@ -143,9 +147,9 @@ export function llmsTxt(origin: string): string {
   return lines.join("\n");
 }
 
-export function llmsFullTxt(origin: string): string {
-  const head = `# ${SITE.name}\n\n> ${SITE.description}\n\nThis file holds ${hostOf(origin)} as Markdown: the home page, the product, comparison and company pages, then every page of the Diffinery docs (${origin}/docs) in reading order. Each page starts with a level-1 heading and its source URL. The REST API is also available as OpenAPI 3.1 at ${origin}/docs/api/openapi.json.\n`;
-  return [head, ...siteFullMarkdown(origin), ...allPages(origin).map((p) => pageMarkdown(p, origin))].join("\n\n---\n\n");
+export function llmsFullTxt(origin: string, opts: { docsOnly?: boolean } = {}): string {
+  const head = `# ${SITE.name}\n\n> ${SITE.description}\n\nThis file holds ${hostOf(origin)} as Markdown: ${opts.docsOnly ? "" : "the home page, the product, comparison and company pages, then "}every page of the Diffinery docs (${origin}/docs) in reading order. Each page starts with a level-1 heading and its source URL. The REST API is also available as OpenAPI 3.1 at ${origin}/docs/api/openapi.json.\n`;
+  return [head, ...(opts.docsOnly ? [] : siteFullMarkdown(origin)), ...allPages(origin).map((p) => pageMarkdown(p, origin))].join("\n\n---\n\n");
 }
 
 /** One docs section's index, in the llms.txt format: /docs/<section>/llms.txt. */

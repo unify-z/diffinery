@@ -175,6 +175,17 @@ export interface Env {
   SMTP_PASSWORD?: string;
   /** Secret: Cloudflare Turnstile secret key, to check the widget on the sign-up page and the security report form (siteverify). */
   TURNSTILE_SECRET?: string;
+  /**
+   * cap.js, a self-hosted proof-of-work CAPTCHA (docs: capjs.js.org): the base URL of its server,
+   * e.g. https://cap.example.com. With CAP_SITE_KEY and CAP_SECRET it makes cap.js available as a
+   * bot check; a site administrator can also set the same three in Settings → Registration, which
+   * wins. See auth/captcha.ts.
+   */
+  CAP_ENDPOINT?: string;
+  /** cap.js site key (a key created in the capd dashboard, not the ADMIN_KEY). */
+  CAP_SITE_KEY?: string;
+  /** Secret: the cap.js site key's secret, used to verify its tokens (never the capd ADMIN_KEY). */
+  CAP_SECRET?: string;
   /** Secret: the GitHub App's client secret, to check who links an installation. */
   GITHUB_APP_CLIENT_SECRET?: string;
   /** Secret: the GitHub App's private key (PEM, as GitHub gives it). */

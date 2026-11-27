@@ -29,6 +29,7 @@ import { hmacSha256 } from "../lib/crypto.js";
 import type { Directory } from "../lib/directory.js";
 import { sha256 } from "../lib/util.js";
 import { CONTACT, homeContent, homeMarkdown, sitePageMarkdown, sitePages } from "./site.js";
+import { isProduction } from "../lib/instance.js";
 
 /**
  * Where submissions go, in order. IndexNow engines share what each one receives, so one accepted
@@ -89,15 +90,20 @@ export const keyLocation = (env: Pick<Env, "PUBLIC_URL">, key: string) => `${ori
  * Every public page built into the Worker, by path, with the content that decides whether it changed:
  * the same pages as the sitemap (less public repositories), plus each one's Markdown version and the llms files.
  */
-export async function sitePageContents(env: Pick<Env, "PUBLIC_URL" | "SIGNUP">): Promise<Map<string, string>> {
+export async function sitePageContents(env: Pick<Env, "PUBLIC_URL" | "SIGNUP" | "DB">): Promise<Map<string, string>> {
   const o = origin(env);
+  // A production instance (lib/instance.ts) doesn't serve the project's own pages, so it never tells
+  // a search engine about them; the docs and the repositories are submitted as usual.
+  const docsOnly = await isProduction(env);
   const pages = new Map<string, string>();
   pages.set("/", await homeContent(o));
-  pages.set("/index.md", homeMarkdown(o));
-  for (const p of sitePages()) {
-    const md = sitePageMarkdown(p, o);
-    pages.set(p.path, `${p.seoTitle ?? ""}\n${p.section}\n${md}`);
-    pages.set(`${p.path}.md`, md);
+  if (!docsOnly) {
+    pages.set("/index.md", homeMarkdown(o));
+    for (const p of sitePages()) {
+      const md = sitePageMarkdown(p, o);
+      pages.set(p.path, `${p.seoTitle ?? ""}\n${p.section}\n${md}`);
+      pages.set(`${p.path}.md`, md);
+    }
   }
   for (const p of allPages(o)) {
     const md = pageMarkdown(p, o);
@@ -106,8 +112,8 @@ export async function sitePageContents(env: Pick<Env, "PUBLIC_URL" | "SIGNUP">):
   }
   // The contact form: its content is the code, so its last-changed date stands in for it.
   pages.set(CONTACT.path, `contact form, updated ${CONTACT.updated}`);
-  pages.set("/llms.txt", llmsTxt(o));
-  pages.set("/llms-full.txt", llmsFullTxt(o));
+  pages.set("/llms.txt", llmsTxt(o, { docsOnly }));
+  pages.set("/llms-full.txt", llmsFullTxt(o, { docsOnly }));
   pages.set("/llms-small.txt", llmsSmallTxt(o));
   for (const sec of SECTIONS) {
     pages.set(sectionLlmsUrl(sec.slug), sectionLlmsTxt(o, sec.slug)!);
@@ -118,8 +124,10 @@ export async function sitePageContents(env: Pick<Env, "PUBLIC_URL" | "SIGNUP">):
 
 const hashCache = new Map<string, Promise<{ hashes: Map<string, string>; fingerprint: string }>>();
 /** Each site page's content hash and one fingerprint of them all. The pages are part of the deploy, so an isolate computes them once. */
-export function siteHashes(env: Pick<Env, "PUBLIC_URL" | "SIGNUP">): Promise<{ hashes: Map<string, string>; fingerprint: string }> {
-  const id = origin(env);
+export async function siteHashes(env: Pick<Env, "PUBLIC_URL" | "SIGNUP" | "DB">): Promise<{ hashes: Map<string, string>; fingerprint: string }> {
+  // The pages depend on the instance's mode (demo has the project's pages, production doesn't), so
+  // the cache key carries it: switching mode rehashes instead of submitting the wrong set.
+  const id = `${origin(env)}|${(await isProduction(env)) ? "production" : "demo"}`;
   let h = hashCache.get(id);
   if (!h) {
     h = (async () => {

@@ -637,9 +637,9 @@ const AUTO_MERGE_METHODS = [
   { value: "rebase", label: "Rebase and merge" },
 ];
 
-export type SettingsTab = "profile" | "account" | "appearance" | "pull-requests" | "security" | "tokens" | "apps" | "installations" | "github-runners" | "agents" | "model-access" | "orgs" | "invitations" | "notifications" | "email-address" | "blocked" | "linked" | "admin" | "reports" | "email" | "audit" | "kill-switches" | "errors" | "security-reports" | "status" | "early-access" | "contact" | "search-engines" | "registration";
+export type SettingsTab = "profile" | "account" | "appearance" | "pull-requests" | "security" | "tokens" | "apps" | "installations" | "github-runners" | "agents" | "model-access" | "orgs" | "invitations" | "notifications" | "email-address" | "blocked" | "linked" | "admin" | "reports" | "email" | "audit" | "kill-switches" | "errors" | "security-reports" | "status" | "early-access" | "contact" | "search-engines" | "registration" | "instance";
 /** The site administration pages: they show when hosted compute is paused. */
-export const ADMIN_TABS: readonly SettingsTab[] = ["admin", "registration", "early-access", "contact", "reports", "email", "audit", "kill-switches", "errors", "security-reports", "status", "search-engines"];
+export const ADMIN_TABS: readonly SettingsTab[] = ["admin", "registration", "instance", "early-access", "contact", "reports", "email", "audit", "kill-switches", "errors", "security-reports", "status", "search-engines"];
 
 /** The number of confirmed early access requests waiting, next to Early access in the sidebar (lib/early-access.ts). */
 const EarlyAccessWaiting = async ({ db }: { db?: D1Database }) => {
@@ -754,6 +754,9 @@ export const SettingsNav: FC<{ me: Account; tab: SettingsTab; db?: D1Database }>
             </a>
             <a href="/settings/admin/registration" class={tab === "registration" ? "on" : ""}>
               Registration
+            </a>
+            <a href="/settings/admin/instance" class={tab === "instance" ? "on" : ""}>
+              Instance
             </a>
             <a href="/settings/admin/early-access" class={tab === "early-access" ? "on" : ""}>
               Early access

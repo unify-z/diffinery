@@ -79,13 +79,13 @@ On an instance whose site administrator turned registration on (**Settings → S
 | --- | --- | --- | --- |
 | **Emailed code** | Your email address, the code from the email, a username and a passkey | Yes, by the code | As the site's setting |
 | **Passkey** | Your email address, a username and a passkey (no email is sent) | No | As the site's setting |
-| **Password** | Your email address, a username and a password (at least 10 characters) | No, unless the site requires an emailed code first | As the site's setting |
+| **Password** | Your email address, a username and a password (at least 10 characters; no email is sent) | No | As the site's setting |
 
 The site's setting is **active** (you can use the site at once) or **pending** (you sign in, but you can't use the site until an administrator approves you). A pending account says **Waiting for an invite** on the home page and can request access.
 
-Where more than one way is on, the sign-in page links to each of them. Every way is refused on the server too, not just hidden: a way that's off answers `403` with the reason, and a closed registration answers `404` on `/signup`. An invitation always works, whatever is set.
+The sign-up forms may ask you to solve a bot check first: Cloudflare Turnstile, or [cap.js](https://capjs.js.org) if the instance runs it, or nothing at all.
 
-With **Passkey**, or **Password** without an emailed code, nobody checks that the address is yours. Such an account is yours to use, but its address grants nothing: it doesn't accept invitations sent to the address, it never makes you a site administrator, and if the address's real owner later proves it (with an invitation's email, an emailed sign-up code, or email recovery) the address moves to them. These two ways also say on the page when an address already has an account, since no email is sent to tell its owner instead.
+With **Passkey** or **Password**, nobody checks that the address is yours. Such an account is yours to use, but its address grants nothing: it doesn't accept invitations sent to the address, it never makes you a site administrator, and if the address's real owner later proves it (with an invitation's email, an emailed sign-up code, or email recovery) the address moves to them. These two ways also say on the page when an address already has an account, since no email is sent to tell its owner instead.
 
 A password is a second way in, and it's never required: you can add a passkey from **Settings → Passkeys and sessions** at any time, and an account with a passkey keeps it.
 

@@ -75,6 +75,11 @@ not depend on the speed of the machine they run on.
 - **The first run must work with no outside service.** A fresh instance has no email, no
   Access application and no passkey, so `/setup` is the only way in. Never remove it, never
   make it depend on a Worker variable, and keep `test/unit/password.test.ts` green.
+- **Demo mode and production mode** (`lib/instance.ts`, **Settings → Instance**): anything that
+  advertises the project (marketing footer, Product/Compare links, the GitHub star button, the
+  project's own pages, `/mcp`, `/api/v3/diffinery`) must be off in production mode, and the pages
+  that stay (docs, API, git) must work in both. A fresh instance is demo, so an upgrade never
+  changes what an instance shows.
 - **Code style:** strict TypeScript, few dependencies, comments that say why, matching the
   density and style of the code around your change.
 - **Pull requests:** one change each, a title that says what it does, an `intent` that says

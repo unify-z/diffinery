@@ -83,7 +83,7 @@ async function requestPage(c: AppContext, o: { values?: FormValues; error?: stri
   const stamp = mode === "missing" ? "" : await formStamp(c.env);
   return render(
     c,
-    { title: "Request early access", status: o.status, turnstile: !!siteKey, description: "This Diffinery instance is invite-only. Ask its administrators for an invitation." },
+    { title: "Request early access", status: o.status, botCheck: siteKey ? "turnstile" : undefined, description: "This Diffinery instance is invite-only. Ask its administrators for an invitation." },
     <div class="ea">
       <section class="ea-head">
         <span class="ea-eyebrow">{raw(ICONS.rocket)} Early access</span>
@@ -346,7 +346,7 @@ async function removePage(c: AppContext, o: { email?: string; error?: string; st
   const stamp = mode === "missing" ? "" : await formStamp(c.env);
   return render(
     c,
-    { title: "Remove your early access request", status: o.status, turnstile: !!siteKey },
+    { title: "Remove your early access request", status: o.status, botCheck: siteKey ? "turnstile" : undefined },
     <div style="max-width:520px;margin:48px auto">
       <h1>Remove your early access request</h1>
       <p class="muted">We'll email the address a link that deletes its request and everything stored about it. Nothing is deleted until the link is opened, so nobody else can remove your request.</p>

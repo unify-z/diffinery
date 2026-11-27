@@ -49,7 +49,7 @@ function reportPage(c: AppContext, o: { values?: FormValues; error?: string; sta
   const v = o.values ?? {};
   return render(
     c,
-    { title: "Report a security problem", status: o.status, turnstile: !!siteKey, description: "Report a security problem in this Diffinery instance privately to its site administrators." },
+    { title: "Report a security problem", status: o.status, botCheck: siteKey ? "turnstile" : undefined, description: "Report a security problem in this Diffinery instance privately to its site administrators." },
     <div style="max-width:720px;margin:32px auto">
       <h1>Report a security problem</h1>
       <p class="muted">

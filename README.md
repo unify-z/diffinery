@@ -181,6 +181,24 @@ Diffinery is a forge: it hosts your code and runs your CI. Here is how it sits n
 
 Read the details: [Diffinery vs GitHub](https://diffinery.com/compare/github) · [vs GitLab](https://diffinery.com/compare/gitlab) · [vs Gitea and Forgejo](https://diffinery.com/compare/gitea) · [vs Blacksmith](https://diffinery.com/compare/blacksmith) · [vs Depot](https://diffinery.com/compare/depot) · [vs CircleCI](https://diffinery.com/compare/circleci) · [vs Buildkite](https://diffinery.com/compare/buildkite) · [vs Bitbucket](https://diffinery.com/compare/bitbucket) · [all GitHub Actions alternatives](https://diffinery.com/compare) · [other Git and CI projects on Cloudflare](https://diffinery.com/built-on-cloudflare#other-git-and-ci-projects-on-cloudflare)
 
+## Demo mode, and production mode
+
+A fresh instance is in **demo mode**: its pages point at this project (the footer, the Product and
+Compare links, the GitHub star button, the product and comparison pages), because an instance you
+just started is usually someone trying Diffinery out.
+
+When the instance is a real Git host, a site administrator switches it to **production mode** in
+**Settings → Site administration → Instance**. Production drops every trace of this project's
+marketing — the footer, the header links, the GitHub star button, and the product, comparison, blog
+and company pages (`/features`, `/compare/*`, `/about`, … answer `404`) — while the docs, the
+instance's own pages, the GitHub-compatible API, GraphQL, git and the MCP server keep working.
+`/llms.txt`, `sitemap.xml` and IndexNow list the instance's pages and repositories, never this
+project's marketing pages.
+
+The same page has **Require an email transport before registration can be opened** (on by default).
+A production instance therefore can't open self-service registration until it can email a sign-up
+code, so an address can be confirmed; demo mode relaxes that so a bare install can be tried.
+
 ## Self-host on your own Cloudflare account
 
 Diffinery is designed to be deployed by anyone to their own Cloudflare account and domain. Nobody who uses your instance needs a Cloudflare account; only the deployment does.
