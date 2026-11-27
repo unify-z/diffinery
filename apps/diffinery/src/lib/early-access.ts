@@ -441,5 +441,8 @@ export const requestJson = (env: Pick<Env, "PUBLIC_URL">, r: EarlyAccessRequest)
   html_url: `${env.PUBLIC_URL}/settings/admin/early-access/${r.id}`,
 });
 
-/** Whether the form takes requests here: only while sign-up is closed (open sign-up needs no request). */
-export const earlyAccessOpen = (env: Pick<Env, "SIGNUP">): boolean => env.SIGNUP !== "open";
+/**
+ * Whether the form takes requests here: only while self-service registration is closed (see
+ * auth/registration.ts). Open registration needs no request, so the form leads to sign-up instead.
+ */
+export const earlyAccessOpen = (registrationEnabled: boolean): boolean => !registrationEnabled;

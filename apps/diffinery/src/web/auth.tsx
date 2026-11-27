@@ -13,7 +13,7 @@ import { raw } from "hono/html";
 import type { FC, PropsWithChildren } from "hono/jsx";
 import { RECENT_SIGNIN_MS, accessToken, requireRecentSignIn, type AppContext } from "../auth/principal.js";
 import { Auth, CHALLENGE_COOKIE, SESSION_COOKIE, SESSION_DAYS, type PasskeyRow, type Subject } from "../auth/sessions.js";
-import { dummyHash, hashPassword, needsRehash, verifyPassword } from "../auth/password.js";
+import { dummyHash, hashPassword, needsRehash, passwordProblem, verifyPassword } from "../auth/password.js";
 import type { Account } from "../lib/directory.js";
 import { verifyAccessJwt } from "../lib/jwt.js";
 import { HttpError, b64url, fromB64url, isValidLogin, newId, now, sha256 } from "../lib/util.js";
@@ -21,15 +21,18 @@ import { ICONS } from "./assets.js";
 import { Form, act, confirmUrl, flash, post, prm, render, statusOf, type WebApp } from "./ui.js";
 import { csrfToken } from "./csrf.js";
 import { validInviteProof } from "../auth/invite-proof.js";
-import { CODE_MINUTES, Signups, normalEmail, signupOpen, turnstileMode, verifyTurnstile } from "../auth/signup.js";
+import { CODE_MINUTES, Signups, normalEmail, turnstileMode, verifyTurnstile, type PendingSignup } from "../auth/signup.js";
+import { METHOD_LABEL, methodProblem, registrationPolicy, requireMethod, turnstileProblem, type Registration, type SignupMethod } from "../auth/registration.js";
+import type { FormData } from "./csrf.js";
 import { enqueueMail } from "../mail/send.js";
 
 /**
- * Passkey (WebAuthn) sign-in. Browsers sign in with a passkey and get a
- * session cookie. New people create their passkey from an invite link (or,
- * with SIGNUP=open, after confirming their email at /signup), and admins can
- * issue one-time sign-in links to add a passkey to an existing account. Cloudflare Access, when configured, protects only /auth/access and
- * serves as an email-based recovery path.
+ * Passkey (WebAuthn) sign-in and the self-service sign-up pages. Browsers sign in with a passkey
+ * (or a password, see auth/password.ts) and get a session cookie. New people create their account
+ * from an invite link, or from /signup when the registration policy (auth/registration.ts) allows
+ * it: an emailed code, a passkey, or a password. Admins can issue one-time sign-in links to add a
+ * passkey to an existing account. Cloudflare Access, when configured, protects only /auth/access
+ * and serves as an email-based recovery path.
  */
 
 const CEREMONY_TIMEOUT = 120_000;
@@ -202,7 +205,8 @@ export async function invitePasskeyPage(c: AppContext, token: string, posted?: s
       </AuthCard>,
     );
   }
-  const exists = inv.email ? await c.get("dir").accountByEmail(inv.email) : null;
+  // An account that holds the address without having proved it doesn't count: the invitation's proof wins.
+  const exists = inv.email ? await c.get("dir").provenAccountByEmail(inv.email) : null;
   if (!inv.email || exists) {
     return render(
       c,
@@ -247,22 +251,59 @@ const PasskeyUnsupported: FC = () => (
   </noscript>
 );
 
-// ---------------------------------------------------------------- open sign-up (SIGNUP=open, auth/signup.ts)
-
-const TURNSTILE_MISSING = "Sign-up needs Turnstile configured: this instance has no TURNSTILE_SITE_KEY and TURNSTILE_SECRET. Ask its administrators for an invite.";
+// ---------------------------------------------------------------- sign-up (auth/registration.ts, auth/signup.ts)
 
 const StepError: FC<{ error?: string }> = ({ error }) => (error ? <div class="flash error" role="alert">{error}</div> : null);
 
-/** Step 1: the email address (and the Turnstile widget). */
-function signupPage(c: AppContext, o: { email?: string; error?: string; status?: number } = {}): Response | Promise<Response> {
-  const mode = turnstileMode(c.env);
-  const siteKey = mode === "verify" ? c.env.TURNSTILE_SITE_KEY : undefined;
+const Turnstile: FC<{ r: Registration }> = ({ r }) =>
+  r.turnstile.siteKey ? <div class="cf-turnstile" data-sitekey={r.turnstile.siteKey} data-theme="auto" style="margin-bottom:12px"></div> : null;
+
+const SignupFoot: FC<{ r: Registration }> = ({ r }) => (
+  <div class="authfoot muted small">
+    <p>
+      Already have an account? <a href="/login">Sign in</a>.
+    </p>
+    {r.methods.length > 1 ? <p>Another way in: {r.methods.map((m) => <a href={`/signup/${m === "email_code" ? "email" : m}`}>{METHOD_LABEL[m].toLowerCase()}</a>).flatMap((a, i) => (i ? [", ", a] : [a]))}.</p> : null}
+    <p>Invited by someone? Open the link in the invitation email.</p>
+  </div>
+);
+
+/** A method's own page, or the chooser when the policy offers more than one. */
+function signupPage(c: AppContext, r: Registration, o: SignupForm = {}): Response | Promise<Response> {
+  if (o.method) return methodPage(c, r, o.method, o);
+  if (r.methods.length === 1) return methodPage(c, r, r.methods[0]!, o);
   return render(
     c,
-    { title: "Create an account", status: mode === "missing" ? 503 : o.status, turnstile: !!siteKey },
+    { title: "Create an account", status: o.status },
     <AuthCard title="Create your Diffinery account">
-      {mode === "missing" ? (
-        <StepError error={TURNSTILE_MISSING} />
+      <p class="muted">Choose how you want to join. Every way creates an account on this instance; an invitation is not needed.</p>
+      <StepError error={o.error} />
+      {r.methods.map((m) => (
+        <a class="btn block" href={`/signup/${m === "email_code" ? "email" : m}`} style="margin-bottom:8px">
+          {METHOD_LABEL[m]}
+        </a>
+      ))}
+      <SignupFoot r={r} />
+    </AuthCard>,
+  );
+}
+
+/** What a sign-up page keeps when it re-renders after a refusal. Never a password. */
+type SignupForm = { method?: SignupMethod; email?: string; login?: string; name?: string; error?: string; status?: number };
+
+function methodPage(c: AppContext, r: Registration, method: SignupMethod, o: SignupForm): Response | Promise<Response> {
+  return method === "password" ? signupPasswordPage(c, r, o) : method === "passkey" ? signupPasskeyStartPage(c, r, o) : signupEmailPage(c, r, o);
+}
+
+/** Step 1 of the emailed code: the address (and the Turnstile widget). */
+function signupEmailPage(c: AppContext, r: Registration, o: SignupForm = {}): Response | Promise<Response> {
+  const problem = turnstileProblem(r);
+  return render(
+    c,
+    { title: "Create an account", status: problem ? 503 : o.status, turnstile: !!r.turnstile.siteKey },
+    <AuthCard title="Create your Diffinery account">
+      {problem ? (
+        <StepError error={problem} />
       ) : (
         <>
           <p class="muted">Enter your email address. We'll send you a code to confirm it, then you pick a username and create a passkey. There is no password.</p>
@@ -272,22 +313,18 @@ function signupPage(c: AppContext, o: { email?: string; error?: string; status?:
               <label for="email">Email address</label>
               <input id="email" name="email" type="email" value={o.email} required maxlength={254} autocomplete="email" />
             </div>
-            {siteKey ? <div class="cf-turnstile" data-sitekey={siteKey} data-theme="auto" style="margin-bottom:12px"></div> : null}
+            <Turnstile r={r} />
             <button class="btn primary block">Email me a code</button>
           </Form>
         </>
       )}
-      <div class="authfoot muted small">
-        <p>
-          Already have an account? <a href="/login">Sign in</a>.
-        </p>
-      </div>
+      <SignupFoot r={r} />
     </AuthCard>,
   );
 }
 
 /** Step 2: the code from the email. */
-function signupCodePage(c: AppContext, o: { email: string; error?: string; status?: number }): Response | Promise<Response> {
+function signupCodePage(c: AppContext, r: Registration, o: { email: string; error?: string; status?: number }): Response | Promise<Response> {
   return render(
     c,
     { title: "Enter your code", status: o.status },
@@ -308,27 +345,134 @@ function signupCodePage(c: AppContext, o: { email: string; error?: string; statu
         <p>
           No email? Check your spam folder, or <a href="/signup">send a new code</a>.
         </p>
+        <SignupFoot r={r} />
       </div>
     </AuthCard>,
   );
 }
 
-/** Step 3: a username and a passkey, bound to the single-use ticket for the confirmed address. */
-function signupPasskeyPage(c: AppContext, email: string, ticket: string): Response | Promise<Response> {
+/** Step 3: a username and a passkey, bound to the single-use ticket for the address. `keep` carries a username chosen on the previous step (passkey method). */
+function signupPasskeyPage(c: AppContext, email: string, ticket: string, via: SignupMethod, r: Registration, keep?: { login: string; name: string }): Response | Promise<Response> {
   return render(
     c,
     { title: "Join Diffinery" },
     <AuthCard title="Join Diffinery">
       <p class="muted">
-        <b>{email}</b> is confirmed. Pick a username, then create a passkey. Your device keeps it and unlocks it with your fingerprint, face or screen lock, so there is no password to remember.
+        {via === "email_code" ? (
+          <>
+            <b>{email}</b> is confirmed. Pick a username, then create a passkey. Your device keeps it and unlocks it with your fingerprint, face or screen lock, so there is no password to remember.
+          </>
+        ) : (
+          <>
+            Create a passkey for <b>{email}</b>. Your device keeps it and unlocks it with your fingerprint, face or screen lock, so there is no password to remember.
+          </>
+        )}
       </p>
       <PasskeyUnsupported />
       <form data-passkey="register" data-next="/">
         <input type="hidden" name="signup" value={ticket} />
-        <NewAccountFields email={email} />
+        {keep ? (
+          <>
+            <input type="hidden" name="login" value={keep.login} />
+            <input type="hidden" name="name" value={keep.name} />
+            <p class="small">
+              Username <b>{keep.login}</b>. <a href="/signup/passkey">Change it</a>
+            </p>
+          </>
+        ) : (
+          <NewAccountFields email={email} />
+        )}
         <PasskeyMessage />
         <button class="btn primary block">Create a passkey and join</button>
       </form>
+      <SignupFoot r={r} />
+    </AuthCard>,
+  );
+}
+
+/** The passkey method, step 1: the address and the username, before the browser's passkey prompt. */
+function signupPasskeyStartPage(c: AppContext, r: Registration, o: SignupForm = {}): Response | Promise<Response> {
+  const problem = turnstileProblem(r);
+  return render(
+    c,
+    { title: "Create an account", status: problem ? 503 : o.status, turnstile: !!r.turnstile.siteKey },
+    <AuthCard title="Create your Diffinery account">
+      {problem ? (
+        <StepError error={problem} />
+      ) : (
+        <>
+          <p class="muted">Pick a username and create a passkey. No email is sent, so this address is not confirmed; an administrator can still reach you at it.</p>
+          <StepError error={o.error} />
+          <Form action="/signup/passkey" t={csrfToken(c)}>
+            <div class="field">
+              <label for="email">Email address</label>
+              <input id="email" name="email" type="email" value={o.email} required maxlength={254} autocomplete="email" />
+            </div>
+            <div class="field">
+              <label for="login">Username</label>
+              <input id="login" name="login" type="text" value={o.login ?? ""} pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,38}" autocomplete="username" />
+              <div class="hint">Leave it empty to use the part of your email address before the @.</div>
+            </div>
+            <div class="field">
+              <label for="name">Display name</label>
+              <input id="name" name="name" type="text" value={o.name ?? ""} maxlength={100} autocomplete="name" />
+            </div>
+            <Turnstile r={r} />
+            <button class="btn primary block">Continue to a passkey</button>
+          </Form>
+        </>
+      )}
+      <SignupFoot r={r} />
+    </AuthCard>,
+  );
+}
+
+/** The password method: one form, an account at once (or after a code, when the policy asks for one). */
+function signupPasswordPage(c: AppContext, r: Registration, o: SignupForm = {}): Response | Promise<Response> {
+  const problem = turnstileProblem(r);
+  return render(
+    c,
+    { title: "Create an account", status: problem ? 503 : o.status, turnstile: !!r.turnstile.siteKey },
+    <AuthCard title="Create your Diffinery account">
+      {problem ? (
+        <StepError error={problem} />
+      ) : (
+        <>
+          <p class="muted">
+            {r.requireEmailVerification
+              ? "Pick a username and a password. We email you a code to confirm the address, then the account is created."
+              : "Pick a username and a password. You can add a passkey from Settings → Passkeys and sessions afterwards."}
+          </p>
+          <StepError error={o.error} />
+          <Form action="/signup/password" t={csrfToken(c)}>
+            <div class="field">
+              <label for="email">Email address</label>
+              <input id="email" name="email" type="email" value={o.email} required maxlength={254} autocomplete="email" />
+            </div>
+            <div class="field">
+              <label for="login">Username</label>
+              <input id="login" name="login" type="text" value={o.login ?? ""} pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,38}" autocomplete="username" />
+              <div class="hint">Leave it empty to use the part of your email address before the @.</div>
+            </div>
+            <div class="field">
+              <label for="name">Display name</label>
+              <input id="name" name="name" type="text" value={o.name ?? ""} maxlength={100} autocomplete="name" />
+            </div>
+            <div class="field">
+              <label for="password">Password</label>
+              <input id="password" name="password" type="password" required autocomplete="new-password" minlength={10} maxlength={200} />
+              <div class="hint">At least 10 characters. Length matters more than punctuation.</div>
+            </div>
+            <div class="field">
+              <label for="confirm">Password again</label>
+              <input id="confirm" name="confirm" type="password" required autocomplete="new-password" minlength={10} maxlength={200} />
+            </div>
+            <Turnstile r={r} />
+            <button class="btn primary block">{r.requireEmailVerification ? "Email me a code" : "Create my account"}</button>
+          </Form>
+        </>
+      )}
+      <SignupFoot r={r} />
     </AuthCard>,
   );
 }
@@ -342,6 +486,32 @@ async function signupStep(fn: () => Promise<Response>, page: (error: string, sta
     if (s.status >= 500 && s.status !== 503) throw e;
     return page(s.message, s.status);
   }
+}
+
+/** Turnstile for a sign-up form, when the policy's setting asks for it ("verify"); "skip" is local development. */
+async function requireTurnstile(c: AppContext, r: Registration, form: FormData, ip: string | null): Promise<void> {
+  if (r.turnstile.mode !== "verify") return;
+  if (!(await verifyTurnstile(c.env.TURNSTILE_SECRET!, form.s("cf-turnstile-response"), ip))) throw new HttpError(403, "We couldn't confirm that you're a person. Please try again.");
+}
+
+/**
+ * The password method's account, once nothing else stands in the way: created active or pending as
+ * the policy says, with the password stored and a session started. A pending account signs in but
+ * can't use the site until a site administrator approves it (requireAccount).
+ */
+async function finishPendingSignup(c: AppContext, email: string, p: PendingSignup, r: Registration, proven: boolean): Promise<Response> {
+  const dir = c.get("dir");
+  const signups = new Signups(c.env);
+  // A proven address (the code was entered) takes over from an account that holds it unproven.
+  if (await signups.accountFor(email, { proven })) throw new HttpError(409, `${email} already has an account. Sign in instead, or use another address.`);
+  if (await dir.loginTaken(p.login)) throw new HttpError(409, `The username ${p.login} was just taken. Pick another one.`);
+  const id = newId();
+  const account = await dir.userForEmail(email, { id, login: p.login, name: p.name || undefined, active: r.newAccountStatus === "active", passwordHash: p.passwordHash, unverified: !proven });
+  // Another account got the address in the meantime: never sign this browser in to it.
+  if (account.id !== id) throw new HttpError(409, `${email} already has an account. Sign in instead, or use another address.`);
+  await startSession(c, new Auth(c.env), account.id, "password", null);
+  c.executionCtx.waitUntil(dir.audit({ actorId: account.id, actorLogin: account.login, action: "account.signup", target: account.login, detail: { method: p.method, email, emailVerified: proven, status: account.status, ...signinContext(c) } }));
+  return c.redirect("/", 303);
 }
 
 export function registerAuth(web: WebApp): void {
@@ -376,6 +546,7 @@ export function registerAuth(web: WebApp): void {
       );
     }
     if (p.type === "account" && p.via !== "dev") return c.redirect(next, 302);
+    const registration = await registrationPolicy(c.env);
     return render(
       c,
       // The pages people land on after signing in mount Kumo islands: fetch the bundle while they sign in.
@@ -401,9 +572,9 @@ export function registerAuth(web: WebApp): void {
           <button class="btn block">Sign in with a password</button>
         </Form>
         <div class="authfoot muted small">
-          {signupOpen(c.env) ? (
+          {registration.enabled ? (
             <p>
-              New here? <a href="/signup">Create an account</a>.
+              New here? <a href="/signup">Create an account</a> ({registration.methods.map((m) => METHOD_LABEL[m].toLowerCase()).join(", ")}).
             </p>
           ) : (
             <p>
@@ -585,20 +756,23 @@ export function registerAuth(web: WebApp): void {
       if (!inv) throw new HttpError(404, "This invite is invalid, already used, or expired.");
       if (!inv.email) throw new HttpError(422, "This invite has no email address. Sign in first, then open it again.");
       if (!(await validInviteProof(c.env, inv.hash, str(body.proof)))) throw new HttpError(403, `Open the link in the invitation email sent to ${inv.email} to create your account.`);
-      if (await dir.accountByEmail(inv.email)) throw new HttpError(409, `${inv.email} already has an account. Sign in with its passkey, then open this invite again.`);
+      if (await dir.provenAccountByEmail(inv.email)) throw new HttpError(409, `${inv.email} already has an account. Sign in with its passkey, then open this invite again.`);
       const { login, name } = await newAccountNames(c, body, inv.email);
       const id = newId();
       subject = { kind: "invite", inviteHash: inv.hash, email: inv.email, login, name, accountId: id };
       user = { id, name: login, displayName: name || login };
     } else if (signupToken) {
-      if (!signupOpen(c.env)) throw new HttpError(404, "Sign-up is closed on this instance.");
       const signups = new Signups(c.env);
       const ticket = await signups.ticket(signupToken);
+      // A ticket says which way in started it; the policy decides whether that way is still on.
+      const policy = await registrationPolicy(c.env);
+      const problem = methodProblem(policy, ticket?.via ?? "email_code");
+      if (problem) throw new HttpError(403, problem);
       if (!ticket) throw new HttpError(404, "This sign-up expired or was already used. Start again at /signup.");
-      if (await signups.accountFor(ticket.email)) throw new HttpError(409, `${ticket.email} already has an account. Sign in with its passkey.`);
+      if (await signups.accountFor(ticket.email, { proven: ticket.via === "email_code" })) throw new HttpError(409, `${ticket.email} already has an account. Sign in with its passkey.`);
       const { login, name } = await newAccountNames(c, body, ticket.email);
       const id = newId();
-      subject = { kind: "signup", ticketHash: ticket.hash, email: ticket.email, login, name, accountId: id };
+      subject = { kind: "signup", ticketHash: ticket.hash, email: ticket.email, login, name, accountId: id, via: ticket.via === "passkey" ? "passkey" : "email_code" };
       user = { id, name: login, displayName: name || login };
     } else if (linkToken) {
       const link = await auth.signinLink(linkToken);
@@ -668,7 +842,7 @@ export function registerAuth(web: WebApp): void {
       // Re-check: the invite or the username may have been taken while the browser was busy.
       const inv = await auth.inviteByHash(s.inviteHash);
       if (!inv) throw new HttpError(404, "This invite was used or expired in the meantime.");
-      if (await dir.accountByEmail(s.email)) throw new HttpError(409, `${s.email} already has an account.`);
+      if (await dir.provenAccountByEmail(s.email)) throw new HttpError(409, `${s.email} already has an account.`);
       if (await dir.loginTaken(s.login)) throw new HttpError(409, `The username ${s.login} was just taken. Pick another one.`);
       // Creating the account accepts every open invite for this email, including this one.
       account = await dir.userForEmail(s.email, { login: s.login, name: s.name || undefined, id: s.accountId });
@@ -682,16 +856,21 @@ export function registerAuth(web: WebApp): void {
       const org = !repo && inv.org_id ? await dir.account(inv.org_id) : null;
       redirect = repo ? `/${repo.owner_login}/${repo.name}` : org ? `/${org.login}` : "/";
     } else if (s.kind === "signup") {
-      if (!signupOpen(c.env)) throw new HttpError(404, "Sign-up is closed on this instance.");
+      const via = s.via ?? "email_code";
+      const policy = await registrationPolicy(c.env);
+      const problem = methodProblem(policy, via);
+      if (problem) throw new HttpError(403, problem);
       const signups = new Signups(c.env);
-      if (await signups.accountFor(s.email)) throw new HttpError(409, `${s.email} already has an account.`);
+      if (await signups.accountFor(s.email, { proven: via === "email_code" })) throw new HttpError(409, `${s.email} already has an account.`);
       if (await dir.loginTaken(s.login)) throw new HttpError(409, `The username ${s.login} was just taken. Pick another one.`);
       if (!(await signups.useTicket(s.ticketHash))) throw new HttpError(404, "This sign-up was used or expired in the meantime. Start again at /signup.");
-      // Open sign-up makes an active account (and accepts any open invites for the address).
-      account = await dir.userForEmail(s.email, { login: s.login, name: s.name || undefined, id: s.accountId, active: true });
+      // The policy's status for new accounts: active unless a site administrator asked for pending.
+      // The passkey way never proved the address; the emailed code did.
+      account = await dir.userForEmail(s.email, { login: s.login, name: s.name || undefined, id: s.accountId, active: policy.newAccountStatus === "active", unverified: via === "passkey" });
       if (account.id !== s.accountId) throw new HttpError(409, `${s.email} already has an account.`);
       await auth.addPasskey({ ...key, account_id: account.id });
-      c.executionCtx.waitUntil(dir.audit({ actorId: account.id, actorLogin: account.login, action: "signup", detail: { method: "passkey", email: s.email, passkeyId: key.id, ...signinContext(c) } }));
+      // `signup` is the passkey sign-up's entry, as it has always been; `method` says which way in it was.
+      c.executionCtx.waitUntil(dir.audit({ actorId: account.id, actorLogin: account.login, action: "signup", detail: { method: "passkey", via, email: s.email, status: account.status, passkeyId: key.id, ...signinContext(c) } }));
       flash(c, "notice", `Welcome to Diffinery, ${account.login}. You can sign in with this passkey from now on.`);
       redirect = "/";
     } else if (s.kind === "link") {
@@ -744,14 +923,17 @@ export function registerAuth(web: WebApp): void {
     }, `We emailed the link to ${inv.email}. Open it from that inbox to create your account.`);
   });
 
-  // ------------------------------------------------------------ open sign-up
+  // ------------------------------------------------------------ sign-up (auth/registration.ts)
 
   // Off, sign-up doesn't exist: its pages answer 404 like any unknown path, before any CSRF check.
   // Only the sign-up page itself leads to the early access request instead (web/early-access.tsx).
+  // The check runs per request against the stored policy: closing registration in the admin page
+  // takes effect on the next request, with no cache in between.
   for (const path of ["/signup", "/signup/*"]) {
     web.use(path, async (c, next) => {
-      if (!signupOpen(c.env) && c.req.method === "GET" && c.req.path === "/signup" && turnstileMode(c.env) !== "missing") return c.redirect("/early-access", 302);
-      if (!signupOpen(c.env)) throw new HttpError(404, "not found");
+      const r = await registrationPolicy(c.env);
+      if (!r.enabled && c.req.method === "GET" && c.req.path === "/signup" && turnstileMode(c.env) !== "missing") return c.redirect("/early-access", 302);
+      if (!r.enabled) throw new HttpError(404, "not found");
       await next();
     });
   }
@@ -759,45 +941,138 @@ export function registerAuth(web: WebApp): void {
   web.get("/signup", async (c) => {
     const p = c.get("principal");
     if (p.type === "account" && p.via !== "dev") return c.redirect("/", 302);
-    return signupPage(c);
+    return signupPage(c, await registrationPolicy(c.env));
   });
 
+  for (const m of ["email", "passkey", "password"] as const) {
+    web.get(`/signup/${m}`, async (c) => {
+      const p = c.get("principal");
+      if (p.type === "account" && p.via !== "dev") return c.redirect("/", 302);
+      const r = await registrationPolicy(c.env);
+      const method: SignupMethod = m === "email" ? "email_code" : m;
+      // A method that isn't on shows the chooser instead, not a dead page.
+      if (!r.methods.includes(method)) return signupPage(c, r);
+      return methodPage(c, r, method, {});
+    });
+  }
+
+  // Email code, step 1: the address. The policy's method check is in requireMethod, here and below.
   post(web, "/signup", async (c, form) => {
     const typed = form.s("email").trim().slice(0, 254);
     return signupStep(
       async () => {
-        const mode = turnstileMode(c.env);
-        if (mode === "missing") throw new HttpError(503, TURNSTILE_MISSING);
+        const r = await requireMethod(c.env, "email_code");
+        const problem = turnstileProblem(r);
+        if (problem) throw new HttpError(503, problem);
         const email = normalEmail(typed);
         if (!email) throw new HttpError(422, "Enter a valid email address.");
         const ip = c.req.header("cf-connecting-ip") ?? null;
-        if (mode === "verify" && !(await verifyTurnstile(c.env.TURNSTILE_SECRET!, form.s("cf-turnstile-response"), ip))) throw new HttpError(403, "We couldn't confirm that you're a person. Please try again.");
+        await requireTurnstile(c, r, form, ip);
         const signups = new Signups(c.env);
-        const existing = await signups.accountFor(email);
+        const existing = await signups.accountFor(email, { proven: true });
         const issued = await signups.issue(email, ip ?? "unknown");
         // The next page reads the same either way, so it never tells whether an address has an account.
         // Its owner learns from the email: a code, or (no code) a note that they already have one.
         await enqueueMail(c.env, [
           existing ? { kind: "signup_attempt", data: { email }, to: { accountId: existing.id }, reason: "account", at: now() } : { kind: "signup_code", data: issued, to: { email }, reason: "signup", at: now() },
         ]);
-        return signupCodePage(c, { email });
+        return signupCodePage(c, r, { email });
       },
-      (error, status) => signupPage(c, { email: typed, error, status }),
+      async (error, status) => signupPage(c, await registrationPolicy(c.env), { method: "email_code", email: typed, error, status }),
     );
   });
 
+  // Email code, step 2: the code. A right one leads to the username and passkey step.
   post(web, "/signup/verify", async (c, form) => {
     const email = normalEmail(form.s("email"));
-    if (!email) return signupPage(c, { error: "Enter a valid email address.", status: 422 });
+    const r = await registrationPolicy(c.env);
+    if (!email) return signupPage(c, r, { method: "email_code", error: "Enter a valid email address.", status: 422 });
     return signupStep(
       async () => {
+        if (!r.enabled) throw new HttpError(403, methodProblem(r, "email_code") ?? "Registration is closed on this instance.");
         const signups = new Signups(c.env);
-        const r = await signups.check(email, form.s("code").trim());
-        if (!r.ok && r.left > 0) throw new HttpError(400, `That code is wrong. You can try ${r.left} more time${r.left === 1 ? "" : "s"}.`);
-        if (!r.ok) throw new HttpError(410, "That code has expired or was entered wrong too many times. Send a new code.");
-        return signupPasskeyPage(c, email, await signups.createTicket(email));
+        // The code is checked first, so a wrong guess counts whichever way in it belongs to.
+        const v = await signups.check(email, form.s("code").trim());
+        if (!v.ok && v.left > 0) throw new HttpError(400, `That code is wrong. You can try ${v.left} more time${v.left === 1 ? "" : "s"}.`);
+        if (!v.ok) throw new HttpError(410, "That code has expired or was entered wrong too many times. Send a new code.");
+        // A code for a password sign-up (the address had to be confirmed first) completes that account;
+        // any other code is the emailed-code way, which must still be on.
+        if (v.pending) {
+          const problem = methodProblem(r, "password");
+          if (problem) throw new HttpError(403, problem);
+          return finishPendingSignup(c, email, v.pending, r, true);
+        }
+        const problem = methodProblem(r, "email_code");
+        if (problem) throw new HttpError(403, problem);
+        return signupPasskeyPage(c, email, await signups.createTicket(email), "email_code", r);
       },
-      (error, status) => signupCodePage(c, { email, error, status }),
+      async (error, status) => signupCodePage(c, await registrationPolicy(c.env), { email, error, status }),
+    );
+  });
+
+  // Passkey method: the address and username, then the passkey prompt on the next page. No email is sent.
+  post(web, "/signup/passkey", async (c, form) => {
+    const typed = form.s("email").trim().slice(0, 254);
+    return signupStep(
+      async () => {
+        const r = await requireMethod(c.env, "passkey");
+        const problem = turnstileProblem(r);
+        if (problem) throw new HttpError(503, problem);
+        const email = normalEmail(typed);
+        if (!email) throw new HttpError(422, "Enter a valid email address.");
+        const ip = c.req.header("cf-connecting-ip") ?? null;
+        await requireTurnstile(c, r, form, ip);
+        const signups = new Signups(c.env);
+        if (await signups.accountFor(email)) throw new HttpError(409, `${email} already has an account. Sign in instead, or use another address.`);
+        const login = form.s("login").trim() || loginFromEmail(email);
+        if (!isValidLogin(login) || login.length > 39) throw new HttpError(422, "Usernames use letters, numbers and dashes (up to 39), and some names are reserved.");
+        if (await c.get("dir").loginTaken(login)) throw new HttpError(409, `The username ${login} is taken. Pick another one.`);
+        return signupPasskeyPage(c, email, await signups.createTicket(email, "passkey"), "passkey", r, { login, name: form.s("name").trim().slice(0, 100) });
+      },
+      async (error, status) => signupPasskeyStartPage(c, await registrationPolicy(c.env), { email: typed, login: form.s("login"), name: form.s("name"), error, status }),
+    );
+  });
+
+  // Password method: the form creates the account at once, or sends a code first when the policy requires the address.
+  post(web, "/signup/password", async (c, form) => {
+    const typed = form.s("email").trim().slice(0, 254);
+    const keep = { email: typed, login: form.s("login"), name: form.s("name") };
+    return signupStep(
+      async () => {
+        const r = await requireMethod(c.env, "password");
+        const problem = turnstileProblem(r);
+        if (problem) throw new HttpError(503, problem);
+        const email = normalEmail(typed);
+        if (!email) throw new HttpError(422, "Enter a valid email address.");
+        const password = form.s("password");
+        const problemPw = passwordProblem(password);
+        if (problemPw) throw new HttpError(422, problemPw);
+        if (password !== form.s("confirm")) throw new HttpError(422, "The two passwords do not match.");
+        const ip = c.req.header("cf-connecting-ip") ?? null;
+        await requireTurnstile(c, r, form, ip);
+        const dirx = c.get("dir");
+        const signups = new Signups(c.env);
+        // With a code first, the page reads the same whether or not the address has an account (as the
+        // emailed-code way does); its owner learns from the email. Without one, nothing is sent, so
+        // the page has to say so: the passkey and password ways tell whether an address is taken.
+        if (!r.requireEmailVerification && (await signups.accountFor(email))) throw new HttpError(409, `${email} already has an account. Sign in instead, or use another address.`);
+        const login = form.s("login").trim() || loginFromEmail(email);
+        if (!isValidLogin(login) || login.length > 39) throw new HttpError(422, "Usernames use letters, numbers and dashes (up to 39), and some names are reserved.");
+        if (await dirx.loginTaken(login)) throw new HttpError(409, `The username ${login} is taken. Pick another one.`);
+        const name = form.s("name").trim().slice(0, 100) || null;
+        const passwordHash = await hashPassword(password);
+        if (r.requireEmailVerification) {
+          // The address is proven first: the password waits, hashed, on the code that is emailed now.
+          const existing = await signups.accountFor(email, { proven: true });
+          const issued = await signups.issue(email, ip ?? "unknown", existing ? undefined : { login, name, passwordHash, method: "password" });
+          await enqueueMail(c.env, [
+            existing ? { kind: "signup_attempt", data: { email }, to: { accountId: existing.id }, reason: "account", at: now() } : { kind: "signup_code", data: issued, to: { email }, reason: "signup", at: now() },
+          ]);
+          return signupCodePage(c, r, { email });
+        }
+        return finishPendingSignup(c, email, { login, name, passwordHash, method: "password" }, r, false);
+      },
+      async (error, status) => signupPasswordPage(c, await registrationPolicy(c.env), { ...keep, error, status }),
     );
   });
 

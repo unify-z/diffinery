@@ -32,6 +32,8 @@ export interface Account {
   password_hash?: string | null;
   /** When the password last changed; a change signs out the account's other browsers. */
   password_updated_at?: string | null;
+  /** 1 when nobody proved the address (self-service sign-up without a code, migration 0046): it grants nothing by itself. */
+  email_unverified?: number;
   /** Set while a site administrator suspends the person (lib/moderation.ts); status is then `disabled`. */
   suspended_at?: string | null;
   suspended_by?: string | null;
@@ -88,6 +90,9 @@ export type AddResult = { added: Account } | { invitedUser: Account; id: string;
 
 /** A person's own pending invitations (binds: now, account id, account email). */
 const MINE = "i.accepted_at IS NULL AND i.expires_at > ? AND (i.org_id IS NOT NULL OR i.repo_id IS NOT NULL) AND (i.account_id = ? OR (i.account_id IS NULL AND i.email = ?))";
+
+/** The address invitations to it count for: none while nobody proved the account's address. */
+const provenEmail = (user: Account): string | null => (user.email_unverified ? null : (user.email ?? null));
 
 /** One account's grants on one repository, as Directory.grantsFor reads them. */
 export type RepoGrants = { repoId: string; accountId: string; access: Role | null; memberRole: string | null; baseRole: string | null };
@@ -207,12 +212,21 @@ export class Directory {
   }
 
   /**
-   * Find or create the user behind a verified email (Access recovery, invite links, open sign-up,
-   * dev sign-in). A new account waits for an invite unless it has one, is a bootstrap
-   * administrator or `hints.active` says so (open sign-up).
+   * Find or create the user behind an email (Access recovery, invite links, open sign-up, dev
+   * sign-in). A new account waits for an invite unless it has one, is a bootstrap administrator or
+   * `hints.active` says so (open sign-up).
+   *
+   * `hints.unverified`: nobody proved the address (the passkey and password ways of self-service
+   * sign-up). Such an account is never a bootstrap administrator and accepts no invitation sent to
+   * the address. Without it the address is proven, and an unverified account holding the address
+   * gives it up first: whoever proves an address owns it.
    */
-  async userForEmail(email: string, hints: { name?: string; login?: string; id?: string; active?: boolean } = {}): Promise<Account> {
-    const existing = await this.accountByEmail(email);
+  async userForEmail(email: string, hints: { name?: string; login?: string; id?: string; active?: boolean; passwordHash?: string; unverified?: boolean } = {}): Promise<Account> {
+    let existing = await this.accountByEmail(email);
+    if (existing?.email_unverified && !hints.unverified) {
+      await this.releaseUnverifiedEmail(existing);
+      existing = null;
+    }
     if (existing) {
       if (existing.status === "pending" && this.isBootstrapAdmin(email)) {
         await this.db.prepare("UPDATE accounts SET status = 'active', site_admin = 1 WHERE id = ?").bind(existing.id).run();
@@ -221,17 +235,35 @@ export class Directory {
       }
       return existing;
     }
-    const admin = this.isBootstrapAdmin(email);
+    const unverified = !!hints.unverified;
+    // An address nobody proved grants nothing: not the bootstrap list, not an invitation to it.
+    const admin = !unverified && this.isBootstrapAdmin(email);
     const login = await this.uniqueLogin(hints.login ?? email.split("@")[0]!);
     const id = hints.id ?? newId();
-    const hasInvite = await this.db.prepare("SELECT 1 FROM invites WHERE email = ? AND accepted_at IS NULL AND expires_at > ?").bind(email, now()).first();
+    const hasInvite = unverified ? null : await this.db.prepare("SELECT 1 FROM invites WHERE email = ? AND accepted_at IS NULL AND expires_at > ?").bind(email, now()).first();
+    // A password from the sign-up form is stored with the account, in the same write that creates it.
     await this.db
-      .prepare("INSERT INTO accounts (id, login, kind, name, email, status, site_admin, created_at) VALUES (?, ?, 'user', ?, ?, ?, ?, ?)")
-      .bind(id, login, hints.name ?? null, email, admin || hasInvite || hints.active ? "active" : "pending", admin ? 1 : 0, now())
+      .prepare("INSERT INTO accounts (id, login, kind, name, email, status, site_admin, password_hash, password_updated_at, email_unverified, created_at) VALUES (?, ?, 'user', ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(id, login, hints.name ?? null, email, admin || hasInvite || hints.active ? "active" : "pending", admin ? 1 : 0, hints.passwordHash ?? null, hints.passwordHash ? now() : null, unverified ? 1 : 0, now())
       .run();
     if (admin) await this.audit({ actorId: id, actorLogin: login, action: "site_admin.grant", target: login, detail: { via: "bootstrap" } });
     if (hasInvite) await this.acceptInvitesForEmail(id, email);
     return (await this.account(id))!;
+  }
+
+  /**
+   * Someone proved an address that an account holds without having proved it: the account keeps
+   * its login, passkeys and password, but not the address, which goes to whoever proved it.
+   */
+  async releaseUnverifiedEmail(account: Account): Promise<void> {
+    const r = await this.db.prepare("UPDATE accounts SET email = NULL WHERE id = ? AND email_unverified = 1").bind(account.id).run();
+    if ((r.meta.changes ?? 0) > 0) await this.audit({ action: "account.email_released", target: account.login, detail: { reason: "address proven by someone else" } });
+  }
+
+  /** The account whose address was proven, or null: an account holding it unproven doesn't count. */
+  async provenAccountByEmail(email: string): Promise<Account | null> {
+    const a = await this.accountByEmail(email);
+    return a && !a.email_unverified ? a : null;
   }
 
   /** Rename an account and change its display name (and an organization's base permission) in one write, after checking every field. */
@@ -622,7 +654,7 @@ export class Directory {
     if (pending) throw new HttpError(422, `${input.email} already has a pending invitation; revoke it first to send a new one`);
     // An address that already belongs to a member still gets an invitation (accepting it changes
     // nothing): refusing would tell the inviter whose address it is.
-    const existing = await this.accountByEmail(input.email);
+    const existing = await this.provenAccountByEmail(input.email);
     const token = randomToken(24);
     const id = newId();
     await this.db
@@ -689,7 +721,7 @@ export class Directory {
     const inviter = inv.invited_by ? await this.account(inv.invited_by) : null;
     const org = inv.org_id ? await this.account(inv.org_id) : null;
     const repo = inv.repo_id ? await this.repoById(inv.repo_id) : null;
-    const existing = await this.accountByEmail(inv.email);
+    const existing = await this.provenAccountByEmail(inv.email);
     await enqueueMail(this.env, [
       {
         kind: "invite",
@@ -723,14 +755,14 @@ export class Directory {
          LEFT JOIN accounts a ON a.id = i.invited_by LEFT JOIN accounts o ON o.id = i.org_id LEFT JOIN repos r ON r.id = i.repo_id LEFT JOIN accounts ro ON ro.id = r.owner_id
          WHERE ${MINE} ORDER BY i.created_at DESC LIMIT 100`,
       )
-      .bind(now(), user.id, user.email ?? null)
+      .bind(now(), user.id, provenEmail(user))
       .all<Record<string, string | null>>();
     return r.results.map((i) => ({ id: i.id!, orgId: i.org_id ?? null, repoId: i.repo_id ?? null, org: i.org_login ?? null, repo: i.repo_full ?? null, role: i.role!, invitedBy: i.inviter ?? null, createdAt: i.created_at!, expiresAt: i.expires_at! }));
   }
 
   /** Accept or decline one of this person's pending invitations (see invitesFor). */
   async answerInvite(id: string, user: Account, accept: boolean): Promise<{ orgId: string | null; repoId: string | null }> {
-    const inv = await this.db.prepare(`SELECT i.* FROM invites i WHERE ${MINE} AND i.id = ?`).bind(now(), user.id, user.email ?? null, id).first<Record<string, string | null>>();
+    const inv = await this.db.prepare(`SELECT i.* FROM invites i WHERE ${MINE} AND i.id = ?`).bind(now(), user.id, provenEmail(user), id).first<Record<string, string | null>>();
     if (!inv) throw new HttpError(404, "no pending invitation with this id");
     if (accept) await this.applyInvite(inv, user);
     else await this.db.prepare("DELETE FROM invites WHERE id = ? AND accepted_at IS NULL").bind(id).run();
@@ -742,7 +774,7 @@ export class Directory {
     if (!inv || inv.accepted_at || inv.expires_at! < now()) throw new HttpError(404, "this invite is invalid or has expired");
     if (inv.account_id) {
       if (inv.account_id !== user.id) throw new HttpError(403, "this invitation is for someone else");
-    } else if (inv.email && inv.email.toLowerCase() !== (user.email ?? "").toLowerCase()) throw new HttpError(403, `this invite was sent to ${inv.email}; sign in with that address`);
+    } else if (inv.email && inv.email.toLowerCase() !== (provenEmail(user) ?? "").toLowerCase()) throw new HttpError(403, `this invite was sent to ${inv.email}; sign in with that address`);
     await this.applyInvite(inv, user);
     return { orgId: inv.org_id ?? null, repoId: inv.repo_id ?? null };
   }

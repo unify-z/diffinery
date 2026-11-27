@@ -44,7 +44,7 @@ export type Subject =
   | { kind: "account"; accountId: string }
   | { kind: "invite"; inviteHash: string; email: string; login: string; name: string; accountId: string }
   | { kind: "link"; linkHash: string; accountId: string }
-  | { kind: "signup"; ticketHash: string; email: string; login: string; name: string; accountId: string }
+  | { kind: "signup"; ticketHash: string; email: string; login: string; name: string; accountId: string; via?: "email_code" | "passkey" }
   | { kind: "login" };
 
 const days = (n: number): string => new Date(Date.now() + n * 86400_000).toISOString();

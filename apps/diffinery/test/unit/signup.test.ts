@@ -9,6 +9,8 @@ function d1(): { DB: D1Database; db: DatabaseSync } {
   const db = new DatabaseSync(":memory:");
   db.exec("CREATE TABLE accounts (id TEXT PRIMARY KEY, login TEXT, kind TEXT, email TEXT, status TEXT)");
   db.exec(readFileSync(new URL("../../migrations/0020_signup.sql", import.meta.url), "utf8"));
+  // The columns the registration policy added to the same tables (auth/registration.ts).
+  db.exec(readFileSync(new URL("../../migrations/0046_registration_policy.sql", import.meta.url), "utf8"));
   const stmt = (sql: string, args: unknown[] = []) => ({
     bind: (...a: unknown[]) => stmt(sql, a),
     first: async () => (db.prepare(sql).get(...(args as never[])) as unknown) ?? null,
@@ -95,7 +97,7 @@ describe("sign-up codes", () => {
     const { code, expiresAt } = await signups.issue("new@example.com", "203.0.113.9");
     expect(Date.parse(expiresAt) - Date.now()).toBeGreaterThan(9 * 60_000);
     expect(Date.parse(expiresAt) - Date.now()).toBeLessThanOrEqual(10 * 60_000);
-    expect(await signups.check("new@example.com", code)).toEqual({ ok: true });
+    expect(await signups.check("new@example.com", code)).toEqual({ ok: true, pending: null });
     expect(await signups.check("new@example.com", code)).toEqual({ ok: false, left: 0 });
     // Another address's code is another address's.
     const other = await signups.issue("other@example.com", "203.0.113.9");
@@ -133,7 +135,7 @@ describe("sign-up codes", () => {
 
   it("finds an existing account whatever the case of its address", async () => {
     const { db, signups } = setup();
-    db.prepare("INSERT INTO accounts VALUES ('a1', 'pal', 'user', 'Pal@Example.com', 'active')").run();
+    db.prepare("INSERT INTO accounts (id, login, kind, email, status) VALUES ('a1', 'pal', 'user', 'Pal@Example.com', 'active')").run();
     expect((await signups.accountFor("pal@example.com"))?.id).toBe("a1");
     expect(await signups.accountFor("nobody@example.com")).toBeNull();
   });

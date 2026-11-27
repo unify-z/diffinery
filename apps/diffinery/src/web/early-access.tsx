@@ -30,6 +30,7 @@ import {
   type RequestState,
 } from "../lib/early-access.js";
 import { normalEmail } from "../auth/signup.js";
+import { registrationPolicy } from "../auth/registration.js";
 import { HttpError } from "../lib/util.js";
 import type { FormData } from "./csrf.js";
 import { ICONS } from "./assets.js";
@@ -382,8 +383,8 @@ const backTo = (v: string): string => (v.startsWith(`${BASE}`) && !v.startsWith(
 export function registerEarlyAccess(web: WebApp): void {
   // ------------------------------------------------------------ the form
 
-  web.get("/early-access", (c) => {
-    if (!earlyAccessOpen(c.env)) return c.redirect("/signup", 302);
+  web.get("/early-access", async (c) => {
+    if (!earlyAccessOpen((await registrationPolicy(c.env)).enabled)) return c.redirect("/signup", 302);
     // Local development's fixed identity (DEV_AUTH) still sees the form, like /signup.
     const p = c.get("principal");
     if (p.type === "account" && p.via !== "dev") return c.redirect("/", 302);
@@ -394,7 +395,7 @@ export function registerEarlyAccess(web: WebApp): void {
     web,
     "/early-access",
     async (c, f) => {
-      if (!earlyAccessOpen(c.env)) return c.redirect("/signup", 303);
+      if (!earlyAccessOpen((await registrationPolicy(c.env)).enabled)) return c.redirect("/signup", 303);
       const values: FormValues = { email: f.s("email").slice(0, 254), name: f.s("name").slice(0, MAX_NAME * 2), company: f.s("company").slice(0, MAX_COMPANY * 2), useCase: f.s("use_case").slice(0, MAX_USE_CASE * 2), hosting: f.s("hosting").slice(0, 40) };
       try {
         // A filled honeypot or a form sent faster than a person types: answer as if it worked, keep nothing.

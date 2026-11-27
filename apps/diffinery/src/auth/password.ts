@@ -75,8 +75,11 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
  * has no password costs the same as one for an account that does. Without it, "no such user" answers
  * in microseconds and "wrong password" in milliseconds, which tells an attacker who exists.
  */
-const DUMMY = hashPassword(randomToken(32));
+// Made on first use, not at module load: Workers refuses random values in global scope, so a
+// module-level call stops the whole Worker from starting (the e2e run caught this on workerd).
+let dummy: Promise<string> | null = null;
 
 export function dummyHash(): Promise<string> {
-  return DUMMY;
+  dummy ??= hashPassword(randomToken(32));
+  return dummy;
 }

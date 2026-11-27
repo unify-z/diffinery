@@ -1,13 +1,18 @@
 import { loopback } from "./dev.js";
 import type { Env } from "../env.js";
 import type { Account } from "../lib/directory.js";
+import type { SignupMethod } from "./registration.js";
 import { hmacSha256, matchesAnyKey, signingSecrets } from "../lib/crypto.js";
 import { HttpError, b64url, newId, now, randomToken, sha256 } from "../lib/util.js";
 
 /**
- * Open sign-up (SIGNUP=open). Someone asks for a code at /signup, proves they read mail at
- * the address by entering it, and gets a short-lived ticket that lets them pick a username
- * and create a passkey, the way an invite link does. Off, the instance stays invite-only.
+ * Sign-up codes and tickets. Someone asks for a code at /signup, proves they read mail at the
+ * address by entering it, and gets a short-lived ticket that lets them pick a username and finish
+ * the account (a passkey, or the password typed before the code). Off, the instance stays
+ * invite-only. Who may start this, and by which way in, is the registration policy
+ * (auth/registration.ts); this file only stores the codes, their counters and the tickets.
+ *
+ * `SIGNUP=open` still forces sign-up open (see signupOpen); the policy decides the rest.
  * Codes and tickets are stored only as hashes.
  */
 
@@ -91,7 +96,10 @@ const codeHashWith = async (secret: string, id: string, code: string): Promise<s
 
 const minutes = (n: number): string => new Date(Date.now() + n * 60_000).toISOString();
 
-export type CodeCheck = { ok: true } | { ok: false; left: number };
+/** The registration typed before a code was sent, when the address had to be confirmed first. */
+export type PendingSignup = { login: string; name: string | null; passwordHash: string; method: SignupMethod };
+
+export type CodeCheck = { ok: true; pending: PendingSignup | null } | { ok: false; left: number };
 
 /** Sign-up codes and tickets in D1. */
 export class Signups {
@@ -101,17 +109,25 @@ export class Signups {
     return this.env.DB;
   }
 
-  /** The person account using this address, whatever its case. */
-  async accountFor(email: string): Promise<Account | null> {
-    return this.db.prepare("SELECT * FROM accounts WHERE kind = 'user' AND lower(email) = ? LIMIT 1").bind(email.toLowerCase()).first<Account>();
+  /**
+   * The person account using this address, whatever its case. `proven`: only one whose address was
+   * proven; a flow that proves the address itself (an emailed code) takes it over from an unproven one.
+   */
+  async accountFor(email: string, o: { proven?: boolean } = {}): Promise<Account | null> {
+    const a = await this.db.prepare("SELECT * FROM accounts WHERE kind = 'user' AND lower(email) = ? LIMIT 1").bind(email.toLowerCase()).first<Account>();
+    return a && o.proven && a.email_unverified ? null : a;
   }
 
   /**
    * A new code for `email`, requested from `ip`, after the daily limits; older codes for the
    * address stop working. An address that already has an account gets a code too, which is
    * never sent: wrong guesses then answer exactly as they would for a new address.
+   *
+   * `pending` holds the registration typed before the code was sent, for a method that needs the
+   * address confirmed first: the password is stored hashed, and the account is created when the
+   * code is entered. The emailed-code flow stores nothing and asks for a username afterwards.
    */
-  async issue(email: string, ip: string): Promise<{ code: string; expiresAt: string }> {
+  async issue(email: string, ip: string, pending?: PendingSignup): Promise<{ code: string; expiresAt: string }> {
     const since = new Date(Date.now() - 86400_000).toISOString();
     const sent = await this.db
       .prepare("SELECT (SELECT count(*) FROM signup_codes WHERE email = ? AND created_at > ?) AS email, (SELECT count(*) FROM signup_codes WHERE ip = ? AND created_at > ?) AS ip")
@@ -124,8 +140,10 @@ export class Signups {
     const at = now();
     const expiresAt = minutes(CODE_MINUTES);
     await this.db.batch([
-      this.db.prepare("UPDATE signup_codes SET expires_at = ? WHERE email = ? AND used_at IS NULL AND expires_at > ?").bind(at, email, at),
-      this.db.prepare("INSERT INTO signup_codes (id, email, ip, code_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, email, ip, await codeHash(this.env, id, code), at, expiresAt),
+      this.db.prepare("UPDATE signup_codes SET expires_at = ?, password_hash = NULL, login = NULL, name = NULL WHERE email = ? AND used_at IS NULL AND expires_at > ?").bind(at, email, at),
+      this.db
+        .prepare("INSERT INTO signup_codes (id, email, ip, code_hash, created_at, expires_at, login, name, password_hash, method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(id, email, ip, await codeHash(this.env, id, code), at, expiresAt, pending?.login ?? null, pending?.name ?? null, pending?.passwordHash ?? null, pending?.method ?? null),
       // Rows older than a day no longer count towards any limit.
       this.db.prepare("DELETE FROM signup_codes WHERE created_at < ?").bind(since),
     ]);
@@ -141,34 +159,39 @@ export class Signups {
     const t = now();
     const row = await this.db
       .prepare(
-        "UPDATE signup_codes SET attempts = attempts + 1 WHERE id = (SELECT id FROM signup_codes WHERE email = ? AND used_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1) AND attempts < ? RETURNING id, code_hash, attempts",
+        "UPDATE signup_codes SET attempts = attempts + 1 WHERE id = (SELECT id FROM signup_codes WHERE email = ? AND used_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1) AND attempts < ? RETURNING id, code_hash, attempts, login, name, password_hash, method",
       )
       .bind(email, t, MAX_CODE_ATTEMPTS)
-      .first<{ id: string; code_hash: string; attempts: number }>();
+      .first<{ id: string; code_hash: string; attempts: number; login: string | null; name: string | null; password_hash: string | null; method: string | null }>();
     if (!row) return { ok: false, left: 0 };
     if (await codeMatches(this.env, row.id, code, row.code_hash)) {
-      const r = await this.db.prepare("UPDATE signup_codes SET used_at = ? WHERE id = ? AND used_at IS NULL").bind(t, row.id).run();
-      if ((r.meta.changes ?? 0) > 0) return { ok: true };
+      // A used code keeps no password hash or names: they move to the account or nowhere.
+      const r = await this.db.prepare("UPDATE signup_codes SET used_at = ?, password_hash = NULL, login = NULL, name = NULL WHERE id = ? AND used_at IS NULL").bind(t, row.id).run();
+      if ((r.meta.changes ?? 0) > 0) {
+        // The registration typed before the code, when there was one: only a password sign-up stores it.
+        const pending: PendingSignup | null = row.login && row.password_hash && row.method === "password" ? { login: row.login, name: row.name, passwordHash: row.password_hash, method: "password" } : null;
+        return { ok: true, pending };
+      }
     }
     return { ok: false, left: Math.max(0, MAX_CODE_ATTEMPTS - row.attempts) };
   }
 
-  /** A single-use ticket for a verified address; returns the token for the passkey form. */
-  async createTicket(email: string): Promise<string> {
+  /** A single-use ticket for a verified (or, for the passkey method, self-declared) address; returns the token for the passkey form. */
+  async createTicket(email: string, via: SignupMethod = "email_code"): Promise<string> {
     const token = randomToken(32);
     await this.db.batch([
       this.db.prepare("DELETE FROM signup_tickets WHERE expires_at < ?").bind(now()),
-      this.db.prepare("INSERT INTO signup_tickets (id, token_hash, email, created_at, expires_at) VALUES (?, ?, ?, ?, ?)").bind(newId(), await sha256(token), email, now(), minutes(TICKET_MINUTES)),
+      this.db.prepare("INSERT INTO signup_tickets (id, token_hash, email, created_at, expires_at, via) VALUES (?, ?, ?, ?, ?, ?)").bind(newId(), await sha256(token), email, now(), minutes(TICKET_MINUTES), via),
     ]);
     return token;
   }
 
   /** An unused, unexpired ticket by its token. */
-  async ticket(token: string): Promise<{ hash: string; email: string } | null> {
+  async ticket(token: string): Promise<{ hash: string; email: string; via: SignupMethod } | null> {
     if (!/^[A-Za-z0-9_-]{20,64}$/.test(token)) return null;
     const hash = await sha256(token);
-    const row = await this.db.prepare("SELECT email FROM signup_tickets WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?").bind(hash, now()).first<{ email: string }>();
-    return row ? { hash, email: row.email } : null;
+    const row = await this.db.prepare("SELECT email, via FROM signup_tickets WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?").bind(hash, now()).first<{ email: string; via: string | null }>();
+    return row ? { hash, email: row.email, via: row.via === "passkey" ? "passkey" : "email_code" } : null;
   }
 
   /** Mark a ticket used; false when it was used first or expired. */
