@@ -106,11 +106,11 @@ export function registerSeo(web: WebApp): void {
       '<?xml version="1.0" encoding="UTF-8"?>',
       '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
       // The home page, then the product, comparison and company pages (web/site.tsx): demo mode only,
-      // since a production instance doesn't serve them.
+      // since a production instance answers 404 for them (HIDDEN_IN_PRODUCTION, lib/instance.ts).
       ...(production ? [] : siteSitemapEntries().map((e) => url(`${origin}${e.path}`, e.updated))),
       // The contact form (web/contact.tsx), for people and AI assistants looking for how to reach the team.
       url(`${origin}${CONTACT.path}`, CONTACT.updated),
-      ...docsSitemapEntries().map((e) => url(`${origin}${e.path}`, e.updated)),
+      ...(production ? [] : docsSitemapEntries().map((e) => url(`${origin}${e.path}`, e.updated))),
       ...repos.map((r) => url(`${origin}/${encodeURIComponent(r.owner_login)}/${encodeURIComponent(r.name)}`, r.pushed_at ?? r.updated_at)),
       "</urlset>",
     ].join("\n");

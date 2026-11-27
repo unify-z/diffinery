@@ -184,10 +184,9 @@ Each save is `registration.policy.update`, `captcha.settings.update` for the cap
 | Footer | The project footer: what Diffinery is, "Deploy your own", Product and Compare columns | A plain footer: Docs, Security, Status, Contact |
 | Header | Product and Compare links, and the "Star on GitHub" button | Neither |
 | Project pages | `/features`, `/compare/*`, `/agents`, `/performance`, `/blog`, `/about` and the other pages about Diffinery the product are served | `404` |
-| Docs | Served | Served |
-| `/llms.txt`, `/llms-full.txt` | The docs and the project's pages | The docs only |
-| `sitemap.xml`, `robots.txt`, IndexNow | The instance's pages and public repositories | The same, without the project's pages |
-| `/mcp`, `/api/v3/diffinery` | Served | `404` |
+| Docs | `/docs`, its Markdown and `/llms.txt`, `/llms-full.txt`, `/llms-small.txt` are served | `404`: the instance is not a copy of the project's documentation. Its own pages (Settings, the repository pages) still link to `/docs/…`; those links stop working until the instance is switched back to demo, or you keep the docs by removing `/docs` and `/docs/*` from `HIDDEN_IN_PRODUCTION` in `lib/instance.ts` |
+| `sitemap.xml`, `robots.txt`, IndexNow | The instance's pages, docs and public repositories | The instance's pages and repositories; nothing hidden is listed or submitted |
+| `/mcp`, `/api/v3/diffinery` | Served | Served (how the CLI and AI agents reach this instance) |
 | `/api/v3`, GraphQL, git | Served | Served |
 | `/setup` | Never asks for an email transport | Never asks for an email transport |
 

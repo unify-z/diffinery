@@ -22,7 +22,6 @@ import { fenceLangs, renderMarkdown } from "../web/markdown.js";
 import { fenceHighlighter } from "../web/highlight.js";
 import { ICONS } from "../web/assets.js";
 import { render, StarButton, type WebApp } from "../web/ui.js";
-import { isProduction } from "../lib/instance.js";
 import { githubStars } from "../web/github-stars.js";
 import { pluginZipFor } from "./claude-plugins.js";
 import { AGENT_SETUP_SH, CLAUDE_PLUGINS, CLI_BUNDLE, CLI_INSTALL_PS1, CLI_INSTALL_SH, CLI_SHA256, CLI_VERSION, DOCS_IMAGES, EDITOR_EXTENSION_SHA256, EDITOR_EXTENSION_VERSION, EDITOR_EXTENSION_VSIX_B64, EDITOR_INSTALL_PS1, EDITOR_INSTALL_SH, JETBRAINS_PLUGIN_DESCRIPTION, JETBRAINS_PLUGIN_SHA256, JETBRAINS_PLUGIN_SINCE_BUILD, JETBRAINS_PLUGIN_VERSION, JETBRAINS_PLUGIN_ZIP_B64 } from "./content.generated.js";
@@ -221,16 +220,8 @@ export function jetbrainsRepository(origin: string, fileName: string): string {
 }
 
 export function registerDocs(web: WebApp): void {
-  // llms.txt indexes the docs and, in demo mode, the project's own pages. A production instance is
-  // its own Git host: it keeps the docs and drops the marketing (lib/instance.ts).
-  web.get("/llms.txt", async (c) => {
-    const o = origin(c);
-    return c.body(llmsTxt(o, { docsOnly: await isProduction(c.env) }), 200, { ...PUBLIC, "content-type": "text/plain; charset=utf-8" });
-  });
-  web.get("/llms-full.txt", async (c) => {
-    const o = origin(c);
-    return c.body(llmsFullTxt(o, { docsOnly: await isProduction(c.env) }), 200, { ...PUBLIC, "content-type": "text/plain; charset=utf-8" });
-  });
+  web.get("/llms.txt", (c) => c.body(llmsTxt(origin(c)), 200, { ...PUBLIC, "content-type": "text/plain; charset=utf-8" }));
+  web.get("/llms-full.txt", (c) => c.body(llmsFullTxt(origin(c)), 200, { ...PUBLIC, "content-type": "text/plain; charset=utf-8" }));
   web.get("/llms-small.txt", (c) => c.body(llmsSmallTxt(origin(c)), 200, { ...PUBLIC, "content-type": "text/plain; charset=utf-8" }));
   web.get("/docs/llms.txt", (c) => c.redirect("/llms.txt", 301));
   web.get("/docs/llms-full.txt", (c) => c.redirect("/llms-full.txt", 301));

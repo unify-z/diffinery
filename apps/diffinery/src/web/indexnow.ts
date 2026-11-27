@@ -97,6 +97,8 @@ export async function sitePageContents(env: Pick<Env, "PUBLIC_URL" | "SIGNUP" | 
   const docsOnly = await isProduction(env);
   const pages = new Map<string, string>();
   pages.set("/", await homeContent(o));
+  // A production instance answers 404 for the project's pages and the docs (HIDDEN_IN_PRODUCTION),
+  // so it never tells a search engine about them either.
   if (!docsOnly) {
     pages.set("/index.md", homeMarkdown(o));
     for (const p of sitePages()) {
@@ -105,15 +107,19 @@ export async function sitePageContents(env: Pick<Env, "PUBLIC_URL" | "SIGNUP" | 
       pages.set(`${p.path}.md`, md);
     }
   }
-  for (const p of allPages(o)) {
-    const md = pageMarkdown(p, o);
-    pages.set(pageUrl(p.slug), `${p.section}\n${md}`);
-    pages.set(markdownUrl(p.slug), md);
+  if (!docsOnly) {
+    for (const p of allPages(o)) {
+      const md = pageMarkdown(p, o);
+      pages.set(pageUrl(p.slug), `${p.section}\n${md}`);
+      pages.set(markdownUrl(p.slug), md);
+    }
   }
   // The contact form: its content is the code, so its last-changed date stands in for it.
   pages.set(CONTACT.path, `contact form, updated ${CONTACT.updated}`);
-  pages.set("/llms.txt", llmsTxt(o, { docsOnly }));
-  pages.set("/llms-full.txt", llmsFullTxt(o, { docsOnly }));
+  if (!docsOnly) {
+    pages.set("/llms.txt", llmsTxt(o));
+    pages.set("/llms-full.txt", llmsFullTxt(o));
+  }
   pages.set("/llms-small.txt", llmsSmallTxt(o));
   for (const sec of SECTIONS) {
     pages.set(sectionLlmsUrl(sec.slug), sectionLlmsTxt(o, sec.slug)!);

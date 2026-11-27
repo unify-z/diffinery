@@ -10,7 +10,7 @@ import { getFirst } from "./lib/storage-keys.js";
 import { BOOKMARK_COOKIE, BOOKMARK_HEADER, d1Session, sessionConstraint } from "./lib/d1.js";
 import { SESSION_COOKIE } from "./auth/sessions.js";
 import { newId, now } from "./lib/util.js";
-import { isProduction } from "./lib/instance.js";
+import { HIDDEN_IN_PRODUCTION, isProduction } from "./lib/instance.js";
 import { bucketsFor, overLimit, tooMany } from "./lib/rate-limit.js";
 import { deliverWebhook, type WebhookDeps, type WebhookRetry } from "./lib/webhooks.js";
 import { APP_HOOK_PREFIX, appHook, appWebhookDeps, deliverToApps } from "./apps/service.js";
@@ -120,6 +120,14 @@ app.use("*", async (c, next) => {
   if (c.get("principal").type === "account" && c.res.status < 400 && !h.has("server-timing")) h.set("server-timing", timing.header((c.req.raw.cf as { colo?: string } | undefined)?.colo));
 });
 
+/**
+ * The project's own pages and docs, and demo mode's links to them. A production instance
+ * (lib/instance.ts) is its own Git host: those paths answer 404 there, so nothing on it advertises
+ * the software it runs on. Registered first, before the routes they hide are mounted.
+ */
+const hiddenInProduction = async (c: Context, next: () => Promise<void>) => ((await isProduction(c.env)) ? c.notFound() : next());
+for (const path of [...HIDDEN_IN_PRODUCTION, ...Object.keys(SITE_PAGES).flatMap((p) => [p, `${p}/`, `${p}.md`])]) app.use(path, hiddenInProduction);
+
 app.get("/healthz", (c) => c.json({ ok: true }));
 
 /**
@@ -173,14 +181,6 @@ app.route("/", graphql);
 app.route("/", api);
 app.route("/", files);
 
-/**
- * The project's own endpoints: the MCP server and the instance's Diffinery-specific API. Demo mode
- * serves them (they are how this repository is tried out); a production instance (lib/instance.ts)
- * is a Git host of its own and answers 404, so nothing advertises the software it runs on. The
- * GitHub-compatible API, GraphQL, git and every page stay.
- */
-const projectEndpoint = async (c: Context, next: () => Promise<void>) => ((await isProduction(c.env)) ? c.notFound() : next());
-for (const path of ["/mcp", "/mcp/*", "/api/v3/diffinery", "/api/v3/diffinery/*"]) app.use(path, projectEndpoint);
 app.route("/", mcp);
 
 // Live updates: authorise in the Worker, then hand the WebSocket to the repository's Durable Object.

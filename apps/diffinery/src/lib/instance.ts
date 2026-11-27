@@ -81,6 +81,17 @@ export async function saveInstanceSettings(env: Pick<Env, "DB">, dir: Pick<Direc
   return { ...next, updatedAt: at, updatedBy: by.login };
 }
 
+/**
+ * The paths a production instance doesn't serve: the project's own pages, its docs, and the
+ * llms.txt / Markdown files that index them. They are what diffinery.com publishes; an instance
+ * that is someone's Git host doesn't need to publish them, and the pages say who built the software.
+ *
+ * Not here: the repository pages, the docs' images, /sitemap.xml and /robots.txt (the instance's own
+ * repositories), /mcp and /api/v3/diffinery (how the CLI and agents reach this instance), /status,
+ * and the API and GraphQL.
+ */
+export const HIDDEN_IN_PRODUCTION: readonly string[] = ["/docs", "/docs/*", "/docs.md", "/index.md", "/llms.txt", "/llms-full.txt", "/llms-small.txt", "/sitemap.md"];
+
 /** One sentence for the admin page. */
 export function instanceSummary(s: InstanceSettings): string {
   return s.mode === "production"
