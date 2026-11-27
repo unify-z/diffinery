@@ -298,6 +298,11 @@ export interface PageOpts {
   description?: string;
   /** The home page: a descriptive title and structured data for search engines. */
   home?: boolean;
+  /**
+   * A page of the instance itself rather than of the project's website: no Product/Compare links,
+   * no GitHub star button and no marketing footer, so `/` reads like any other Git host.
+   */
+  gitHost?: boolean;
   /** The whole <title>, when the page's own wording is better for search results than "<title> · Diffinery". */
   seoTitle?: string;
   /** Structured data (schema.org objects) for search engines and AI assistants. */
@@ -561,7 +566,7 @@ async function renderPage(c: AppContext, opts: PageOpts, body: Child, watch?: Wa
               </button>
             ) : null}
             <nav>
-              {!active ? (
+              {!active && !opts.gitHost ? (
                 <>
                   <a href="/features" class="nav-site">
                     Product
@@ -574,7 +579,7 @@ async function renderPage(c: AppContext, opts: PageOpts, body: Child, watch?: Wa
               <a href="/docs" title="Documentation">
                 Docs
               </a>
-              {active ? null : <StarButton stars={stars} compact class="nav-star" />}
+              {active || opts.gitHost ? null : <StarButton stars={stars} compact class="nav-star" />}
               {active && me ? (
                 <>
                   <a href="/new" title="New repository">
@@ -610,11 +615,11 @@ async function renderPage(c: AppContext, opts: PageOpts, body: Child, watch?: Wa
           {raw(content)}
         </main>
         <footer class="site-foot">
-          {active ? null : <SiteFooter stars={stars} />}
+          {active || opts.gitHost ? null : <SiteFooter stars={stars} />}
           <div class="wrap">
             <div class="foot-bar">
               <span>© {new Date().getUTCFullYear()} Diffinery</span>
-              {active ? (
+              {active || opts.gitHost ? (
                 <nav aria-label="Footer">
                   <a href="/docs">Docs</a>
                   <a href="/docs/security/disclosure">Security</a>

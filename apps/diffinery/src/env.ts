@@ -126,6 +126,11 @@ export interface Env {
   MCP_REGISTRY_AUTH?: string;
   /** Comma-separated emails that become site admins on first sign-in (logins are ignored). Deployed by scripts/bootstrap-admins.sh. */
   BOOTSTRAP_ADMINS: string;
+  /**
+   * "repos": the front page for signed-out visitors is the instance's repositories, as on any Git
+   * host. Anything else, or unset, serves the project's landing page (the diffinery.com home).
+   */
+  SITE_HOME?: string;
   /** e.g. example.cloudflareaccess.com — empty disables Access verification. */
   ACCESS_TEAM_DOMAIN: string;
   /** Access application audience tag. */

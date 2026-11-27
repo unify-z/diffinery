@@ -18,8 +18,9 @@ import { ICONS } from "./assets.js";
 import { GITHUB_REPO, githubStars } from "./github-stars.js";
 import { fenceHighlighter } from "./highlight.js";
 import { escapeHtml, fenceLangs, renderMarkdown } from "./markdown.js";
+import type { Repo } from "../lib/directory.js";
 import { SITE } from "./seo.js";
-import { render, StarButton, type WebApp } from "./ui.js";
+import { Time, render, StarButton, type WebApp } from "./ui.js";
 
 export interface SitePageInfo {
   /** URL path, e.g. "/compare/github". */
@@ -516,6 +517,70 @@ export const Landing: FC<{ stars?: number | null }> = ({ stars }) => (
     </section>
   </div>
 );
+
+/** One row of the front page's repository table. */
+const RepoRow: FC<{ repo: Repo }> = ({ repo }) => (
+  <tr>
+    <td>
+      <a href={`/${repo.owner_login}/${repo.name}`}>
+        <b>
+          {repo.owner_login}/{repo.name}
+        </b>
+      </a>
+      {repo.archived ? <span class="badge">archived</span> : null}
+      {repo.description ? <div class="muted small">{repo.description}</div> : null}
+    </td>
+    <td class="right muted small nowrap">
+      <Time at={repo.pushed_at ?? repo.updated_at} />
+    </td>
+  </tr>
+);
+
+/**
+ * The instance's own front page for signed-out visitors, when SITE_HOME=repos: what a Git host
+ * shows, which is its public repositories and a way in. The project's own instance leaves the
+ * variable unset and keeps the landing page below; the marketing and documentation pages have their
+ * own paths either way (/features, /compare, /docs). `gitHost` drops the Product/Compare links, the
+ * star button and the marketing footer.
+ */
+export async function repositoriesPage(c: AppContext): Promise<Response> {
+  const o = origin(c);
+  if (wantsMarkdown(c)) return markdownResponse(c, homeMarkdown(o));
+  c.header("link", `<${o}/index.md>; rel="alternate"; type="text/markdown", <${o}/llms.txt>; rel="describedby"; type="text/plain"`);
+  c.header("vary", "Accept");
+  const repos = await c.get("dir").publicRepos(20);
+  const host = new URL(c.env.PUBLIC_URL).host;
+  return render(
+    c,
+    {
+      title: "Repositories",
+      gitHost: true,
+      description: `Public repositories on ${host}: a Git host with pull requests, issues and CI.`,
+      jsonLd: [{ "@type": "WebSite", "@id": `${o}/#website`, url: `${o}/`, name: host, description: `Public repositories on ${host}.` }],
+    },
+    <div class="home">
+      <div class="box">
+        <div class="head">
+          <h1 class="m0">Repositories</h1>
+          <span class="badge">{repos.length}</span>
+        </div>
+        {repos.length ? (
+          <table class="files">
+            <tbody>
+              {repos.map((repo) => (
+                <RepoRow repo={repo} />
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div class="empty">
+            No public repositories yet. <a href="/login">Sign in</a> to create one, or push to an existing repository.
+          </div>
+        )}
+      </div>
+    </div>,
+  );
+}
 
 /** The home page for signed-out visitors (registerAccount calls this for "/"). */
 export async function landingPage(c: AppContext): Promise<Response> {
